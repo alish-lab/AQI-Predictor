@@ -1,29 +1,35 @@
 # AQI Predictor
 
-Air-quality (US AQI) forecasting for Karachi using hourly Open-Meteo air-quality
-data. The project is organised as a set of pipelines:
+Air-quality (US AQI) forecasting for Karachi using hourly Open-Meteo data. The
+project is organised as a set of pipelines:
 
-- **feature_pipeline** – fetch raw air-quality data from Open-Meteo.
+- **feature_pipeline** – fetch air-quality + weather from Open-Meteo, engineer
+  features, and store them (`fetch.py`, `features.py`, `store.py`).
 - **training_pipeline** – build sequences and train models (LSTM, XGBoost).
 - **inference_pipeline** – generate predictions (to be built).
 - **dashboard** – visualise forecasts (to be built).
 
-This repo is in an early restructuring phase. See [PROGRESS.md](PROGRESS.md) for
-the phase tracker. Data, features, and models are carried over as-is and will be
-rebuilt in later phases.
+The schema is multi-location from the start (every row carries a `location`
+key), though only Karachi is active. See [PROGRESS.md](PROGRESS.md) for the phase
+tracker.
 
 ## Project layout
 
 ```
 aqi_predictor/
-  feature_pipeline/     Open-Meteo fetch logic (api_call.py)
-  training_pipeline/    process.py, lstm_model.py, xg_model.py
-  inference_pipeline/   (placeholder)
-  dashboard/            (placeholder)
-scripts/                entry-point / one-off scripts
-notebooks/              exploratory notebooks
-tests/                  test suite
-data/                   local data (raw_aqi.csv is git-ignored)
+  config.py            LOCATIONS, paths, constants, .env loading
+  feature_pipeline/
+    fetch.py           Open-Meteo air-quality + weather, merged on (location, time)
+    features.py        engineered features + missing-data handling
+    store.py           local parquet feature store (Hopsworks-shaped interface)
+  training_pipeline/   process.py, lstm_model.py, xg_model.py (rebuilt in Phase 2)
+  inference_pipeline/  (placeholder)
+  dashboard/           (placeholder)
+scripts/
+  backfill.py          historical backfill: fetch -> features -> store
+tests/
+  smoke_feature_pipeline.py   offline invariant checks (run with plain python)
+data/                  local data, git-ignored (raw pulls + feature store)
 ```
 
 ## Setup
@@ -33,35 +39,42 @@ Requires Python 3.10+ (developed on 3.13).
 ```bash
 # 1. Create and activate a virtual environment
 python -m venv .venv
-# Windows (PowerShell)
-.venv\Scripts\Activate.ps1
-# macOS / Linux
-source .venv/bin/activate
+.venv\Scripts\Activate.ps1        # Windows (PowerShell)
+source .venv/bin/activate          # macOS / Linux
 
-# 2. Install pinned dependencies (source of truth)
+# 2. Install pinned dependencies (source of truth) + the package
 pip install -r requirements.txt
-
-# 3. Install the package in editable mode
 pip install -e .
 
-# 4. Configure environment
-cp .env.example .env   # then edit .env with real values
+# 3. Configure secrets
+cp .env.example .env               # then edit .env
 ```
 
 ## Environment variables
 
-See [.env.example](.env.example):
+Only secrets live in `.env` (see [.env.example](.env.example)). Coordinates and
+locations are code, in `aqi_predictor/config.py`.
 
-| Variable                 | Purpose                                   |
-| ------------------------ | ----------------------------------------- |
-| `HOPSWORKS_API_KEY`      | Hopsworks feature store API key           |
-| `HOPSWORKS_PROJECT_NAME` | Hopsworks project name                    |
-| `LATITUDE`               | Latitude for Open-Meteo queries           |
-| `LONGITUDE`              | Longitude for Open-Meteo queries          |
+| Variable                 | Purpose                          |
+| ------------------------ | -------------------------------- |
+| `HOPSWORKS_API_KEY`      | Hopsworks feature store API key  |
+| `HOPSWORKS_PROJECT_NAME` | Hopsworks project name           |
 
 ## Usage
 
 ```bash
-# Fetch raw air-quality data -> data/raw_aqi.csv
-python -m aqi_predictor.feature_pipeline.api_call
+# Backfill the full engineered feature history into data/feature_store/
+python scripts/backfill.py
+
+# ...for a shorter range or a single location
+python scripts/backfill.py --start 2026-01-01 --location karachi
 ```
+
+```python
+from aqi_predictor.feature_pipeline import store
+
+df = store.get_feature_view("2026-01-01", "2026-06-30")   # read a slice back
+```
+
+A data-quality report is printed after each backfill and saved to
+`data/feature_store/backfill_report.json`.

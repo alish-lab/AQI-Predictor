@@ -1,7 +1,9 @@
 # --- Project-specific ---
 .venv/
 .env
-data/raw_aqi.csv
+# Local data: raw API pulls and the local feature-store fallback. Regenerate with
+# `python scripts/backfill.py`.
+data/
 
 # --- Python ---
 __pycache__/
