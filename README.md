@@ -5,7 +5,9 @@ project is organised as a set of pipelines:
 
 - **feature_pipeline** – fetch air-quality + weather from Open-Meteo, engineer
   features, and store them (`fetch.py`, `features.py`, `store.py`).
-- **training_pipeline** – build sequences and train models (LSTM, XGBoost).
+- **training_pipeline** – build the supervised dataset, train and compare models
+  for next-hour `us_aqi`, backtest recursively, and register the best
+  (`dataset.py`, `train.py`, `backtest.py`, `registry.py`).
 - **inference_pipeline** – generate predictions (to be built).
 - **dashboard** – visualise forecasts (to be built).
 
@@ -22,14 +24,21 @@ aqi_predictor/
     fetch.py           Open-Meteo air-quality + weather, merged on (location, time)
     features.py        engineered features + missing-data handling
     store.py           local parquet feature store (Hopsworks-shaped interface)
-  training_pipeline/   process.py, lstm_model.py, xg_model.py (rebuilt in Phase 2)
+  training_pipeline/
+    dataset.py         supervised frame (us_aqi_next target) + time-ordered split
+    train.py           Ridge / RandomForest / XGBoost, comparison, register best
+    backtest.py        recursive +24h/+48h/+72h walk-forward over the test period
+    registry.py        local model registry (Hopsworks-shaped interface)
+    lstm_model.py       old code, deferred (currently unbuildable)
   inference_pipeline/  (placeholder)
   dashboard/           (placeholder)
 scripts/
   backfill.py          historical backfill: fetch -> features -> store
 tests/
-  smoke_feature_pipeline.py   offline invariant checks (run with plain python)
+  smoke_feature_pipeline.py    offline invariant checks (run with plain python)
+  smoke_training_pipeline.py   offline invariant checks (run with plain python)
 data/                  local data, git-ignored (raw pulls + feature store)
+models/                local model registry + reports, git-ignored
 ```
 
 ## Setup
@@ -78,3 +87,21 @@ df = store.get_feature_view("2026-01-01", "2026-06-30")   # read a slice back
 
 A data-quality report is printed after each backfill and saved to
 `data/feature_store/backfill_report.json`.
+
+```bash
+# Train + compare models, register the best by test RMSE
+python -m aqi_predictor.training_pipeline.train
+
+# Recursive multi-horizon backtest (+24h / +48h / +72h)
+python -m aqi_predictor.training_pipeline.backtest
+```
+
+```python
+from aqi_predictor.training_pipeline import registry
+
+model, metadata = registry.load_best_model("us_aqi_next")
+```
+
+Model artifacts, `training_comparison.json` and `backtest_report.json` land in
+`models/` (git-ignored).
+

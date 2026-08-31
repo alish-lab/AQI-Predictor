@@ -20,8 +20,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"                     # raw merged API pulls
 FEATURE_STORE_DIR = DATA_DIR / "feature_store"  # local Hopsworks fallback
+MODELS_DIR = PROJECT_ROOT / "models"           # local model registry
 
-for _d in (DATA_DIR, RAW_DIR, FEATURE_STORE_DIR):
+for _d in (DATA_DIR, RAW_DIR, FEATURE_STORE_DIR, MODELS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # --------------------------------------------------------------------------- #

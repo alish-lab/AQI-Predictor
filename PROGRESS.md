@@ -52,14 +52,53 @@ engineering, fixing the data-leakage / hardcoded-date issues, GitHub Actions.
       0 gaps / 0 interpolated / 0 dropped (Open-Meteo reanalysis is gap-free)
 
 Notes / deferred:
-- `aqi_predictor/feature_pipeline/api_call.py` kept for now – `training_pipeline/
-  process.py` still imports it. It gets removed when the training pipeline is
-  rebuilt in Phase 2.
 - Real Hopsworks integration is **not** done – `store.py` is a local fallback with
   the same call signatures; a later phase swaps the internals.
 
 Out of scope for this phase: real Hopsworks integration, training-pipeline
 changes, dashboard, GitHub Actions/CI.
+
+## Phase 2 – Training pipeline (rebuild) — done
+
+- [x] `training_pipeline/dataset.py` – reads the full feature store via
+      `get_feature_view()`, adds per-location `us_aqi_next = us_aqi.shift(-1)`,
+      drops each location's last row + first ~24h (undefined long-window features).
+      Time-ordered per-location split: last 14 days = test, prior 14 days = val,
+      rest = train. No shuffling.
+- [x] `training_pipeline/train.py` – trains Ridge (with a **train-fit**
+      `StandardScaler` in a Pipeline, fixing the old scaler-leakage bug),
+      RandomForest, XGBoost to predict `us_aqi_next`; evaluates all three on val
+      and test with RMSE / MAE / R²; prints + saves a comparison table
+      (`models/training_comparison.json`). The old "accuracy" metric is gone.
+- [x] `training_pipeline/metrics.py` – shared RMSE / MAE / R² (no "accuracy").
+- [x] `training_pipeline/backtest.py` – recursive walk-forward over the test
+      period to +24h / +48h / +72h, per model, reporting RMSE / MAE / R² at each
+      horizon (`models/backtest_report.json`). Future weather = real historical
+      rows (stand-in for a real forecast); `us_aqi`-derived features follow the
+      predicted trajectory; `pm2_5`/`pm10` (+ other pollutants) and their
+      lag/rolling features are frozen at the forecast origin – documented
+      simplification since the model only predicts `us_aqi`.
+- [x] `training_pipeline/registry.py` – local model registry under `models/`
+      (git-ignored), Hopsworks-shaped: `register_model(name, model, metrics,
+      feature_list) -> version` and `load_best_model(name) -> (model, metadata)`
+      (best = lowest test RMSE). joblib + metadata JSON per version.
+- [x] `train.py` registers the best model (by test RMSE) as `us_aqi_next`.
+- [x] Deleted superseded files: `feature_pipeline/api_call.py`,
+      `training_pipeline/process.py`, `training_pipeline/xg_model.py`.
+      `training_pipeline/lstm_model.py` left in place (deferred – see above).
+- [x] `tests/smoke_training_pipeline.py` – target no-leakage, split non-overlap,
+      registry round-trip. Existing `tests/smoke_feature_pipeline.py` still passes.
+- [x] `.gitignore` – added `models/`.
+
+Run so far (Karachi, 2024-07-29 → 2026-08-31):
+- 1-hour models are near-perfect (persistence dominates): test RMSE ≈ 0.16
+  (RandomForest, best), 0.28 (XGBoost), 0.63 (Ridge).
+- Recursive multi-horizon degrades as expected: at +24h RMSE ≈ 7.6 / R² ≈ 0.58;
+  at +48h and +72h R² goes negative – a dedicated multi-step approach is future
+  work.
+
+Out of scope for this phase: real Hopsworks, LSTM training, dashboard, GitHub
+Actions, live weather-forecast fetching.
 
 ## Still to be placed in a later phase (do not lose track of these)
 
@@ -68,8 +107,9 @@ changes, dashboard, GitHub Actions/CI.
   installed) for the trained models.
 - **Hazardous-AQI alerting** – threshold detection + notification when predicted
   or observed `us_aqi` crosses unhealthy levels.
-
-## Phase 2 – Training pipeline (rebuild) — not started
+- **LSTM model** – `training_pipeline/lstm_model.py` is left from the old code and
+  is currently unbuildable (it imports the deleted `process.py`). A sequence model
+  is deferred; it gets rebuilt against `dataset.py` in a later phase.
 
 ## Phase 3 – Inference pipeline & fixes — not started
 

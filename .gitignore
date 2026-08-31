@@ -4,6 +4,9 @@
 # Local data: raw API pulls and the local feature-store fallback. Regenerate with
 # `python scripts/backfill.py`.
 data/
+# Local model registry + training/backtest reports. Regenerate with
+# `python -m aqi_predictor.training_pipeline.train`.
+models/
 
 # --- Python ---
 __pycache__/
