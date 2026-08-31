@@ -72,12 +72,8 @@ changes, dashboard, GitHub Actions/CI.
       (`models/training_comparison.json`). The old "accuracy" metric is gone.
 - [x] `training_pipeline/metrics.py` – shared RMSE / MAE / R² (no "accuracy").
 - [x] `training_pipeline/backtest.py` – recursive walk-forward over the test
-      period to +24h / +48h / +72h, per model, reporting RMSE / MAE / R² at each
-      horizon (`models/backtest_report.json`). Future weather = real historical
-      rows (stand-in for a real forecast); `us_aqi`-derived features follow the
-      predicted trajectory; `pm2_5`/`pm10` (+ other pollutants) and their
-      lag/rolling features are frozen at the forecast origin – documented
-      simplification since the model only predicts `us_aqi`.
+      period to +24h / +48h / +72h. **Removed in Phase 2b** (superseded by direct
+      multi-horizon models); its finding is preserved below.
 - [x] `training_pipeline/registry.py` – local model registry under `models/`
       (git-ignored), Hopsworks-shaped: `register_model(name, model, metrics,
       feature_list) -> version` and `load_best_model(name) -> (model, metadata)`
@@ -92,13 +88,55 @@ changes, dashboard, GitHub Actions/CI.
 
 Run so far (Karachi, 2024-07-29 → 2026-08-31):
 - 1-hour models are near-perfect (persistence dominates): test RMSE ≈ 0.16
-  (RandomForest, best), 0.28 (XGBoost), 0.63 (Ridge).
-- Recursive multi-horizon degrades as expected: at +24h RMSE ≈ 7.6 / R² ≈ 0.58;
-  at +48h and +72h R² goes negative – a dedicated multi-step approach is future
-  work.
+  (RandomForest, best), 0.28 (XGBoost), 0.63 (Ridge). `us_aqi_next` v1 = that
+  RandomForest.
 
 Out of scope for this phase: real Hopsworks, LSTM training, dashboard, GitHub
 Actions, live weather-forecast fetching.
+
+## Phase 2b – Direct multi-horizon models — done
+
+**Why recursive was dropped.** Walking the 1-hour model forward one step at a
+time (old `backtest.py`, 266 test origins) compounded error at every hop, made
+worse by having to freeze `pm2_5`/`pm10` (the 1h model only predicts `us_aqi`).
+The best recursive model (XGBoost) scored R² 0.584 at +24h but **−0.277 at +48h
+and −1.229 at +72h** – i.e. worse than predicting the mean (RandomForest: 0.572 /
+−0.293 / −1.252; Ridge: 0.543 / −0.390 / −1.420). `backtest.py` and
+`models/backtest_report.json` were removed.
+
+**Replacement.** `training_pipeline/dataset.py` now takes a `horizon_hours`
+parameter (target `us_aqi.shift(-h)`, named `us_aqi_next` for h=1 or `us_aqi_h<h>`
+otherwise). `training_pipeline/train_multi_horizon.py` builds the dataset at each
+of +24h/+48h/+72h, trains Ridge / RandomForest / XGBoost directly on *current*
+known features (no recursion, no frozen pm), and registers the best-by-test-RMSE
+model as `us_aqi_h24` / `us_aqi_h48` / `us_aqi_h72`. Combined results saved to
+`models/training_comparison_multi_horizon.json`.
+
+Direct multi-horizon results (Karachi, best model per horizon, test split):
+
+| horizon | best model     |   RMSE |    MAE |      R² |
+| ------- | -------------- | -----: | -----: | ------: |
+| +24h    | XGBoost        |  5.292 |  4.296 |  0.7914 |
+| +48h    | RandomForest   |  9.943 |  8.379 |  0.2637 |
+| +72h    | XGBoost        | 11.905 | 10.436 | −0.0556 |
+
+Direct beats recursive at every horizon (e.g. +72h RMSE 18.2 → 11.9, R² −1.23 →
+−0.06). But +72h R² is still ≈ 0 – 3-day-ahead AQI is not usefully predictable
+from current conditions alone with these features; that gap is real, not a
+tuning artifact.
+
+- [x] `dataset.py` – `horizon_hours` param on `build_training_frame` /
+      `split_dataset`; `Splits` carries its `target` name; h=1 behaviour and
+      `TARGET="us_aqi_next"` unchanged.
+- [x] `train_multi_horizon.py` – per-horizon train / compare / register, reusing
+      `build_models()` + `train_all()` from `train.py` (which is untouched).
+- [x] Deleted `training_pipeline/backtest.py` + `models/backtest_report.json`.
+- [x] `tests/smoke_training_pipeline.py` – added horizon-target no-leakage check
+      (h=24) and a non-default-horizon split check. All prior checks + the feature
+      smoke test still pass.
+
+Out of scope: dashboard, inference wiring, GitHub Actions, live weather-forecast
+fetching, LSTM.
 
 ## Still to be placed in a later phase (do not lose track of these)
 

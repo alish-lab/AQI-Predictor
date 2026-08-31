@@ -6,8 +6,8 @@ project is organised as a set of pipelines:
 - **feature_pipeline** – fetch air-quality + weather from Open-Meteo, engineer
   features, and store them (`fetch.py`, `features.py`, `store.py`).
 - **training_pipeline** – build the supervised dataset, train and compare models
-  for next-hour `us_aqi`, backtest recursively, and register the best
-  (`dataset.py`, `train.py`, `backtest.py`, `registry.py`).
+  for next-hour and direct +24h/+48h/+72h `us_aqi`, and register the best
+  (`dataset.py`, `train.py`, `train_multi_horizon.py`, `registry.py`).
 - **inference_pipeline** – generate predictions (to be built).
 - **dashboard** – visualise forecasts (to be built).
 
@@ -25,9 +25,9 @@ aqi_predictor/
     features.py        engineered features + missing-data handling
     store.py           local parquet feature store (Hopsworks-shaped interface)
   training_pipeline/
-    dataset.py         supervised frame (us_aqi_next target) + time-ordered split
-    train.py           Ridge / RandomForest / XGBoost, comparison, register best
-    backtest.py        recursive +24h/+48h/+72h walk-forward over the test period
+    dataset.py         supervised frame (horizon_hours target) + time-ordered split
+    train.py           Ridge / RandomForest / XGBoost for +1h, comparison, register best
+    train_multi_horizon.py   direct +24h/+48h/+72h models, one registered per horizon
     registry.py        local model registry (Hopsworks-shaped interface)
     lstm_model.py       old code, deferred (currently unbuildable)
   inference_pipeline/  (placeholder)
@@ -89,19 +89,19 @@ A data-quality report is printed after each backfill and saved to
 `data/feature_store/backfill_report.json`.
 
 ```bash
-# Train + compare models, register the best by test RMSE
+# Train + compare +1h models, register the best by test RMSE (-> us_aqi_next)
 python -m aqi_predictor.training_pipeline.train
 
-# Recursive multi-horizon backtest (+24h / +48h / +72h)
-python -m aqi_predictor.training_pipeline.backtest
+# Direct multi-horizon models (-> us_aqi_h24 / us_aqi_h48 / us_aqi_h72)
+python -m aqi_predictor.training_pipeline.train_multi_horizon
 ```
 
 ```python
 from aqi_predictor.training_pipeline import registry
 
-model, metadata = registry.load_best_model("us_aqi_next")
+model, metadata = registry.load_best_model("us_aqi_next")   # or us_aqi_h24 / h48 / h72
 ```
 
-Model artifacts, `training_comparison.json` and `backtest_report.json` land in
-`models/` (git-ignored).
+Model artifacts and the `training_comparison*.json` reports land in `models/`
+(git-ignored).
 

@@ -2,9 +2,11 @@
 
 Run:  python tests/smoke_training_pipeline.py
 
-Covers the Phase 2 definition-of-done invariants:
+Covers the Phase 2 / 2b definition-of-done invariants:
 * the ``us_aqi_next`` target is a genuine future value (no leakage) and each
   location's last row is dropped,
+* the horizon-parameterized target (``horizon_hours=24``) is the real value 24h
+  later, and ``split_dataset`` works at a non-default horizon,
 * the time-ordered train / val / test split has no overlap,
 * the local model registry round-trips a model + metadata and picks "best" by
   test RMSE.
@@ -25,6 +27,7 @@ from aqi_predictor.training_pipeline.dataset import (
     TARGET,
     build_training_frame,
     split_dataset,
+    target_name,
 )
 
 
@@ -74,6 +77,58 @@ def check_target_no_leakage() -> None:
     print("ok  target: us_aqi_next is a true +1h value, last row dropped per location")
 
 
+def check_horizon_target_no_leakage() -> None:
+    horizon = 24
+    tgt = target_name(horizon)
+    assert tgt == "us_aqi_h24", tgt
+
+    raw = _synthetic()
+    frame = build_training_frame(raw, horizon_hours=horizon)
+
+    for loc, g in frame.groupby("location"):
+        g = g.sort_values("time").reset_index(drop=True)
+        # target at time t must be the actual us_aqi exactly `horizon` hours later
+        merged = g.merge(
+            g[["time", "us_aqi"]].rename(
+                columns={"time": "t_future", "us_aqi": "u_future"}
+            ),
+            left_on=g["time"] + pd.Timedelta(hours=horizon),
+            right_on="t_future",
+            how="inner",
+        )
+        assert len(merged) > 0
+        assert (merged[tgt] == merged["u_future"]).all(), loc
+
+    # the last `horizon` rows per location (no ground truth) are dropped
+    raw_last = raw.groupby("location")["time"].max()
+    kept_last = frame.groupby("location")["time"].max()
+    assert (
+        (raw_last - kept_last) >= pd.Timedelta(hours=horizon)
+    ).all(), (kept_last.to_dict(), raw_last.to_dict())
+    assert not frame[tgt].isna().any()
+    print("ok  horizon target: us_aqi_h24 is the real value 24h later, tail dropped")
+
+
+def check_split_non_default_horizon() -> None:
+    horizon = 24
+    tgt = target_name(horizon)
+    frame = build_training_frame(_synthetic(), horizon_hours=horizon)
+    splits = split_dataset(frame, horizon_hours=horizon)
+
+    assert splits.target == tgt
+    assert tgt not in splits.feature_columns
+    assert len(splits.train) and len(splits.val) and len(splits.test)
+    for part in (splits.train, splits.val, splits.test):
+        assert tgt in part.columns and not part[tgt].isna().any()
+
+    for loc in splits.test["location"].unique():
+        tr = splits.train.loc[splits.train["location"] == loc, "time"]
+        va = splits.val.loc[splits.val["location"] == loc, "time"]
+        te = splits.test.loc[splits.test["location"] == loc, "time"]
+        assert tr.max() < va.min() < va.max() < te.min(), loc
+    print("ok  split @ horizon=24: target us_aqi_h24, train < val < test, no overlap")
+
+
 def check_split_no_overlap() -> None:
     splits = split_dataset(build_training_frame(_synthetic()))
     assert len(splits.train) and len(splits.val) and len(splits.test)
@@ -116,6 +171,8 @@ def check_registry_roundtrip(tmp: Path) -> None:
 
 def main() -> int:
     check_target_no_leakage()
+    check_horizon_target_no_leakage()
+    check_split_non_default_horizon()
     check_split_no_overlap()
     import tempfile
 
