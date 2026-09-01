@@ -219,15 +219,21 @@ forward-looking Open-Meteo forecast — what a deployed system uses. Everything
 else in the row (pollutants, time features, lags/rolling on `us_aqi`/`pm*`) is
 "as of now" and identical to how the feature store builds it.
 
-**Note on "now".** Open-Meteo's air-quality endpoint returns data through the end
-of the current UTC day (the tail is its own short-range forecast), so the "now"
-row's timestamp is end-of-today UTC, not the wall-clock hour. Horizons are
-measured from there. `forecast_ahead` requests enough days that this never leaves
-a target time uncovered.
+**Anchoring "now" (fixed).** Open-Meteo's air-quality endpoint returns data
+through the end of the current UTC day (the tail is its own short-range
+forecast), so the unfiltered last fetched row can be up to ~23h in the future.
+Initially `_now_row()` took that literal last row, which anchored "current AQI"
+and every target time to end-of-today UTC — a real correctness issue. Fixed:
+`_now_row()` now filters to `time <= now.floor("h")` before taking the last row
+(the same guard `fetch.latest_hour` uses), raising a clear `RuntimeError` if
+nothing survives. "Current" is now a real recent hour and each `target_time` is
+genuinely `current_time + horizon_hours`.
 
-Sample live run (Karachi, 2026-09-01): current us_aqi 63 → +1h 63.0
-(`us_aqi_next` v1), +24h 65.0 (`us_aqi_h24` v2), +48h 67.5 (`us_aqi_h48` v2),
-+72h 66.1 (`us_aqi_h72` v2) — all plausible, each tagged with model name/version.
+Sample live run (Karachi, 2026-09-01, `generated_at` 08:14 UTC): current us_aqi
+61 @ 08:00 → +1h 61.0 @ 09:00 (`us_aqi_next` v1), +24h 68.4 @ 09-02 08:00
+(`us_aqi_h24` v2), +48h 73.3 @ 09-03 08:00 (`us_aqi_h48` v2), +72h 71.7 @
+09-04 08:00 (`us_aqi_h72` v2) — "current" is within minutes of `generated_at`
+and each target time is exactly the horizon out.
 
 - [x] `fetch.forecast_ahead(location, hours_ahead=72)` – forward weather from the
       forecast endpoint, reusing `_get_json` / `_hourly_frame`.

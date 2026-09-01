@@ -36,10 +36,14 @@ def model_name(horizon_hours: int) -> str:
 
 
 def _now_row(location_name: str) -> pd.Series:
-    """The most recent fully-featured row for ``location_name``.
+    """The most recent fully-featured row at or before the current wall-clock hour.
 
     Built from the last ``_HISTORY_DAYS`` days of history run through
-    ``features.build_features`` (the same engineering the feature store uses).
+    ``features.build_features`` (the same engineering the feature store uses),
+    then filtered to ``time <= now`` before taking the last row. Open-Meteo's
+    air-quality endpoint forecasts the remainder of the current UTC day, so the
+    unfiltered last row can be up to ~23h in the future; this returns a real
+    recent hour instead (same guard ``fetch.latest_hour`` uses).
     """
     now = pd.Timestamp.now(tz="UTC")
     start = (now - pd.Timedelta(days=_HISTORY_DAYS)).date().isoformat()
@@ -52,7 +56,16 @@ def _now_row(location_name: str) -> pd.Series:
             f"could not build a feature row for {location_name!r} from "
             f"{_HISTORY_DAYS} days of history (build_features returned nothing)"
         )
-    return featured.iloc[-1]
+
+    current_hour = now.floor("h")
+    usable = featured[featured["time"] <= current_hour]
+    if usable.empty:
+        raise RuntimeError(
+            f"no fully-featured row for {location_name!r} at or before "
+            f"{current_hour} (fetched {len(featured)} rows spanning "
+            f"{featured['time'].min()} .. {featured['time'].max()})"
+        )
+    return usable.iloc[-1]
 
 
 def build_input_row(
