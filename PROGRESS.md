@@ -190,7 +190,56 @@ fetching, LSTM.
   is currently unbuildable (it imports the deleted `process.py`). A sequence model
   is deferred; it gets rebuilt against `dataset.py` in a later phase.
 
-## Phase 3 – Inference pipeline & fixes — not started
+## Phase 3 – Live inference pipeline — done
+
+`aqi_predictor/inference_pipeline/predict.py` produces a live multi-horizon US
+AQI forecast for a location. `forecast(location_name)`:
+
+1. builds a fully-featured "now" row – `fetch.historical(location, now-4d, today)`
+   → `features.build_features()`, take the last row;
+2. pulls forward-looking hourly weather – new
+   `fetch.forecast_ahead(location, hours_ahead=72)`, which hits the Open-Meteo
+   forecast endpoint (`forecast_days` sized to cover the horizon + buffer,
+   `past_days=2`);
+3. for each horizon in (1, 24, 48, 72): `registry.load_best_model(name)`
+   (`us_aqi_next` for +1h, else `us_aqi_h{h}`), builds the input row **strictly
+   from `metadata["feature_list"]`** (exact columns and order), overwriting every
+   `<var>_target` column with the forecast value at `now + h`; a feature that
+   can't be sourced raises rather than silently mismatching;
+4. returns `{location, generated_at, current: {time, us_aqi}, forecasts: [{
+   horizon_hours, target_time, predicted_us_aqi, model_name, model_version}, …]}`.
+
+CLI: `python -m aqi_predictor.inference_pipeline.predict --location karachi`
+(`--json` for raw output).
+
+**How this differs from training.** In `dataset.py` the `<var>_target` columns
+are filled with the *recorded* historical weather (a stand-in for "a forecast
+would have been available at the time"). Here they come from an actual
+forward-looking Open-Meteo forecast — what a deployed system uses. Everything
+else in the row (pollutants, time features, lags/rolling on `us_aqi`/`pm*`) is
+"as of now" and identical to how the feature store builds it.
+
+**Note on "now".** Open-Meteo's air-quality endpoint returns data through the end
+of the current UTC day (the tail is its own short-range forecast), so the "now"
+row's timestamp is end-of-today UTC, not the wall-clock hour. Horizons are
+measured from there. `forecast_ahead` requests enough days that this never leaves
+a target time uncovered.
+
+Sample live run (Karachi, 2026-09-01): current us_aqi 63 → +1h 63.0
+(`us_aqi_next` v1), +24h 65.0 (`us_aqi_h24` v2), +48h 67.5 (`us_aqi_h48` v2),
++72h 66.1 (`us_aqi_h72` v2) — all plausible, each tagged with model name/version.
+
+- [x] `fetch.forecast_ahead(location, hours_ahead=72)` – forward weather from the
+      forecast endpoint, reusing `_get_json` / `_hourly_frame`.
+- [x] `inference_pipeline/predict.py` – `forecast()` + `build_input_row()` +
+      `--location` CLI.
+- [x] `tests/smoke_inference_pipeline.py` – input-row columns == `feature_list`
+      exactly / in order; `<var>_target` uses the forecast value for the horizon,
+      not the "now" value; missing feature or uncovered target time raises. All
+      existing smoke tests still pass.
+
+Out of scope: dashboard/UI, GitHub Actions, hazardous-AQI alerting, LSTM, more
+horizons.
 
 ## Phase 4 – Dashboard — not started
 

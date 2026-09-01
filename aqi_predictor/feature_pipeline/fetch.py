@@ -11,9 +11,11 @@ Public API:
 
 * ``historical(location, start_date, end_date)`` - full hourly history for a range.
 * ``latest_hour(location)``                      - the most recent complete hour.
+* ``forecast_ahead(location, hours_ahead)``      - forward-looking hourly weather.
 
-Both return a DataFrame with columns ``["location", "time", *POLLUTANT_VARS,
-*WEATHER_VARS]`` where ``time`` is tz-aware UTC.
+``historical`` / ``latest_hour`` return a DataFrame with columns
+``["location", "time", *POLLUTANT_VARS, *WEATHER_VARS]``; ``forecast_ahead``
+returns ``["time", *WEATHER_VARS]``. ``time`` is always tz-aware UTC.
 """
 
 from __future__ import annotations
@@ -266,3 +268,34 @@ def latest_hour(location: str | dict) -> pd.DataFrame:
     if usable.empty:
         raise RuntimeError(f"No usable air-quality row for {loc['name']} at/<= {now}")
     return usable.tail(1).reset_index(drop=True)
+
+
+def forecast_ahead(location: str | dict, hours_ahead: int = 72) -> pd.DataFrame:
+    """Forward-looking hourly weather for ``location`` from the forecast endpoint.
+
+    Returns ``["time", *WEATHER_VARS]`` (``time`` tz-aware UTC), covering at least
+    ``hours_ahead`` hours out from the current hour (with a few days of buffer on
+    each side so callers whose "now" is slightly stale are still covered).
+
+    Unlike :func:`historical`, this is a genuine forecast - the values have not
+    happened yet.
+    """
+    loc = location if isinstance(location, dict) else get_location(location)
+    if hours_ahead < 1:
+        raise ValueError(f"hours_ahead must be >= 1, got {hours_ahead}")
+    forecast_days = min(max(1, hours_ahead // 24 + 3), 16)  # endpoint caps at 16
+
+    payload = _get_json(
+        WEATHER_FORECAST_URL,
+        {
+            "latitude": loc["lat"],
+            "longitude": loc["lon"],
+            "hourly": ",".join(WEATHER_VARS),
+            "forecast_days": forecast_days,
+            "past_days": 2,
+            "timezone": "UTC",
+        },
+    )
+    frame = _hourly_frame(payload, WEATHER_VARS)
+    frame[WEATHER_VARS] = frame[WEATHER_VARS].apply(pd.to_numeric, errors="coerce")
+    return frame.sort_values("time").reset_index(drop=True)

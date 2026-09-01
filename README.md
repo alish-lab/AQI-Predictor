@@ -8,7 +8,8 @@ project is organised as a set of pipelines:
 - **training_pipeline** – build the supervised dataset, train and compare models
   for next-hour and direct +24h/+48h/+72h `us_aqi`, and register the best
   (`dataset.py`, `train.py`, `train_multi_horizon.py`, `registry.py`).
-- **inference_pipeline** – generate predictions (to be built).
+- **inference_pipeline** – live multi-horizon forecast: current conditions +
+  Open-Meteo weather forecast → `us_aqi` at +1h/+24h/+48h/+72h (`predict.py`).
 - **dashboard** – visualise forecasts (to be built).
 
 The schema is multi-location from the start (every row carries a `location`
@@ -30,13 +31,15 @@ aqi_predictor/
     train_multi_horizon.py   direct +24h/+48h/+72h models, one registered per horizon
     registry.py        local model registry (Hopsworks-shaped interface)
     lstm_model.py       old code, deferred (currently unbuildable)
-  inference_pipeline/  (placeholder)
+  inference_pipeline/
+    predict.py         live +1h/+24h/+48h/+72h forecast (real weather forecast)
   dashboard/           (placeholder)
 scripts/
   backfill.py          historical backfill: fetch -> features -> store
 tests/
-  smoke_feature_pipeline.py    offline invariant checks (run with plain python)
-  smoke_training_pipeline.py   offline invariant checks (run with plain python)
+  smoke_feature_pipeline.py     offline invariant checks (run with plain python)
+  smoke_training_pipeline.py    offline invariant checks (run with plain python)
+  smoke_inference_pipeline.py   offline invariant checks (run with plain python)
 data/                  local data, git-ignored (raw pulls + feature store)
 models/                local model registry + reports, git-ignored
 ```
@@ -104,4 +107,11 @@ model, metadata = registry.load_best_model("us_aqi_next")   # or us_aqi_h24 / h4
 
 Model artifacts and the `training_comparison*.json` reports land in `models/`
 (git-ignored).
+
+```bash
+# Live forecast: current conditions + Open-Meteo weather forecast -> AQI at
+# +1h / +24h / +48h / +72h
+python -m aqi_predictor.inference_pipeline.predict --location karachi
+python -m aqi_predictor.inference_pipeline.predict --location karachi --json
+```
 
