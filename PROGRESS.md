@@ -350,18 +350,47 @@ one-line print fix in `train.py`).
   feature group with upsert-by-key semantics; a model registry keyed by
   `(name, version)`), so the same round-trip assertions run with no network.
 
+**Verified end to end against project `p/43151` (eu-west serverless):**
+- `migrate_to_hopsworks.py`: 18,336 rows → `aqi_features` v1, materialization job
+  SUCCEEDED, read-back 18,336 / 52 cols, count matches the local parquet.
+- all four `tests/smoke_*.py` pass, no network.
+- `train.py`: `us_aqi_next` **v1** registered (random_forest, test RMSE 0.155).
+- `train_multi_horizon.py`: `us_aqi_h24` / `h48` / `h72` **v1** registered
+  (all XGBoost; test RMSE 4.949 / 7.910 / 10.371, R² 0.818 / 0.534 / 0.199 —
+  identical to Phase 2c, confirming the migrated data matches).
+- `predict.py --location karachi`: live 4-horizon forecast from the newly
+  registered Hopsworks models.
+- Hopsworks UI shows the `aqi_features` feature group and all 4 model names.
+
 **Dependency fallout (`requirements.txt`).** `hopsworks[python]==5.0.6` pins
 `pandas<2.4`, `numpy<2.5`, `protobuf<5`. To make one venv resolve:
 - `tensorflow==2.21.0` **dropped** — nothing imports it, and its
   `protobuf>=6.31.1` pin is irreconcilable with Hopsworks. (`torch` stays; it is
   still only used by the deferred, unbuildable `lstm_model.py`.)
 - `pandas` 3.0.5 → **2.3.3**, `streamlit` 1.62.0 → **1.59.1**.
+- `+ deltalake==1.6.3` — hopsworks needs a delta-rs lib for non-Spark ops and
+  ships `hops-deltalake` for it, but that wheel is linux / macos-arm only, so
+  upstream `deltalake` is used. (In the end the feature group is HUDI, not
+  DELTA — see the `store.py` note above — but hopsworks imports the module
+  regardless, and it is the natural path if the offline store is ever S3.)
 - `twofish` (transitive via `pyjks` via `hopsworks`) ships no wheel and there is
   no C compiler on this machine; it is satisfied by a pure-Python import shim
-  (`twofish` 0.3.0) that raises if the cipher is ever actually exercised — the
-  API-key REST login path never touches it. If this project moves to a machine
-  with MSVC build tools, `pip install --force-reinstall --no-binary twofish
-  twofish` swaps in the real one.
+  (`twofish` 0.3.0, built from `scripts/`-adjacent throwaway — not vendored) that
+  raises if the cipher is ever actually exercised. The API-key REST login path
+  never touches it. On a machine with MSVC build tools,
+  `pip install --force-reinstall --no-binary twofish twofish` swaps in the real
+  one. **`requirements.txt` still lists `twofish` only implicitly** (it is a
+  transitive dep); the shim is installed separately and is not in the file.
+
+**Windows / Serverless notes.** Getting an external `hopsworks[python]` client to
+write a feature group from Windows took three fixes, all in `hopsworks_client.py`
+or `store.py`: (1) `cert_folder` override — the `/tmp` default can't be created
+on Windows; (2) pre-create `<drive>:\tmp` — the Kafka connector's PEM export
+hardcodes `/tmp`; (3) HUDI + `statistics_config=False` — the DELTA/delta-rs path
+needs a direct HDFS namenode connection the serverless project doesn't expose
+externally, and the HUDI Spark job's built-in statistics step was returning a
+backend 500. With those, `migrate_to_hopsworks.py` runs clean: 18,336 rows, the
+materialization job SUCCEEDS, and the read-back count matches the local parquet.
 
 Out of scope: GitHub Actions/CI, Streamlit Cloud deploy, hazardous-AQI alerting,
 LSTM.

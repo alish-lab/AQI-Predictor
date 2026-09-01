@@ -17,8 +17,12 @@ python-dotenv==1.2.3
 pyarrow==25.0.1
 streamlit==1.59.1
 hopsworks[python]==5.0.6
-# delta-rs: lets the hopsworks python engine write the feature group directly
-# (DELTA format, no server-side Spark job). hopsworks ships hops-deltalake for
-# this but that wheel is linux/macos-arm only, so use upstream deltalake.
+# delta-rs: hopsworks needs a delta lib for non-Spark ops and ships hops-deltalake
+# for it, but that wheel is linux/macos-arm only, so use upstream deltalake.
 deltalake==1.6.3
+# twofish (transitive via pyjks via hopsworks) ships only an sdist; on Windows
+# with no C compiler the build fails. This local shim satisfies the import; the
+# JKS-decrypt path that would actually use the cipher is never hit by API-key
+# login. On Linux/macOS the real sdist builds fine, so the marker skips the shim.
+./vendor/twofish ; platform_system == "Windows"
 

@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twofish"
+version = "0.3.0"
+description = "Pure-Python import shim for the twofish C extension (used on Windows, where the real sdist needs a C compiler). Raises if the cipher is actually invoked."
+requires-python = ">=3.8"
+
+[tool.setuptools]
+py-modules = ["twofish"]
