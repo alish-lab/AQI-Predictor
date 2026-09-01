@@ -5,6 +5,11 @@ The prediction target is US AQI ``horizon_hours`` into the future
 (the default) keeps the legacy target name ``us_aqi_next``; larger horizons are
 named ``us_aqi_h<h>`` (e.g. ``us_aqi_h24``).
 
+Alongside the target, each weather variable's value *at target time* is added as
+a ``<var>_target`` input feature (same per-location forward shift as the target).
+Weather at t+h drives pollutant dispersion, so a model predicting AQI that far
+ahead needs it; without it, longer horizons had no future-weather signal at all.
+
 Splits are strictly time-ordered (no shuffling): for each location the last
 ``SPLIT_DAYS`` days are the test set, the ``SPLIT_DAYS`` days before that are
 validation, and everything earlier is training. Larger horizons naturally drop
@@ -17,6 +22,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from aqi_predictor.config import WEATHER_VARS
 from aqi_predictor.feature_pipeline import store
 
 TARGET = "us_aqi_next"          # legacy name for the horizon_hours=1 target
@@ -62,11 +68,13 @@ def build_training_frame(
     df: pd.DataFrame | None = None,
     horizon_hours: int = DEFAULT_HORIZON_HOURS,
 ) -> pd.DataFrame:
-    """Return the feature store with a per-location future-``us_aqi`` target.
+    """Return the feature store with a per-location future-``us_aqi`` target
+    plus ``<var>_target`` weather-at-target-time input features.
 
     Rows with no known target (each location's last ``horizon_hours`` rows) and
     rows with any missing feature value (each location's first ~24h, where
-    long-window features are undefined) are dropped.
+    long-window features are undefined) are dropped. The ``<var>_target`` columns
+    are NaN for the same tail rows the target is, so no special-casing is needed.
     """
     tgt = target_name(horizon_hours)
     if df is None:
@@ -75,7 +83,11 @@ def build_training_frame(
         raise RuntimeError("feature store returned no rows; run scripts/backfill.py first")
 
     df = df.sort_values(ID_COLUMNS).reset_index(drop=True)
-    df[tgt] = df.groupby("location", sort=False)[SOURCE_TARGET].shift(-horizon_hours)
+    by_location = df.groupby("location", sort=False)
+    df[tgt] = by_location[SOURCE_TARGET].shift(-horizon_hours)
+    for col in WEATHER_VARS:
+        if col in df.columns:
+            df[f"{col}_target"] = by_location[col].shift(-horizon_hours)
 
     feats = feature_columns(df, tgt)
     before = len(df)

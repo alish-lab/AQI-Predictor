@@ -6,9 +6,11 @@ per horizon that predicts the future value directly from *current* known
 features, so there is no step-by-step error accumulation and no need to freeze
 pm2.5 / pm10.
 
-For each horizon: build the dataset at that horizon, train Ridge / RandomForest /
-XGBoost (same estimators as ``train.py``), evaluate on val + test, and register
-the best-by-test-RMSE model as ``us_aqi_h24`` / ``us_aqi_h48`` / ``us_aqi_h72``.
+For each horizon: build the dataset at that horizon (features include
+``<var>_target`` = weather at target time, added by ``dataset.py``), train
+Ridge / RandomForest / XGBoost (same estimators as ``train.py``), evaluate on
+val + test, and register the best-by-test-RMSE model as ``us_aqi_h24`` /
+``us_aqi_h48`` / ``us_aqi_h72``.
 
 Run:  python -m aqi_predictor.training_pipeline.train_multi_horizon
 """

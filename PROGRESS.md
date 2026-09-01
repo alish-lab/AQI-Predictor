@@ -121,9 +121,8 @@ Direct multi-horizon results (Karachi, best model per horizon, test split):
 | +72h    | XGBoost        | 11.905 | 10.436 | −0.0556 |
 
 Direct beats recursive at every horizon (e.g. +72h RMSE 18.2 → 11.9, R² −1.23 →
-−0.06). But +72h R² is still ≈ 0 – 3-day-ahead AQI is not usefully predictable
-from current conditions alone with these features; that gap is real, not a
-tuning artifact.
+−0.06). But +48h/+72h were still weak – see Phase 2c, which traced most of that
+to a missing feature (no future-weather signal) rather than an inherent limit.
 
 - [x] `dataset.py` – `horizon_hours` param on `build_training_frame` /
       `split_dataset`; `Splits` carries its `target` name; h=1 behaviour and
@@ -134,6 +133,48 @@ tuning artifact.
 - [x] `tests/smoke_training_pipeline.py` – added horizon-target no-leakage check
       (h=24) and a non-default-horizon split check. All prior checks + the feature
       smoke test still pass.
+
+Out of scope: dashboard, inference wiring, GitHub Actions, live weather-forecast
+fetching, LSTM.
+
+## Phase 2c – Weather-at-target-time features — done
+
+**The bug.** `dataset.feature_columns()` only exposed features observed at time
+`t`. A model predicting AQI at `t+72h` therefore had *zero* information about the
+weather at `t+72h` – wind, humidity and pressure at target time are what actually
+drive pollutant dispersion, so the +48h/+72h models were guessing blind on their
+most important signal.
+
+**The fix.** `build_training_frame(horizon_hours)` now also adds, for every
+`config.WEATHER_VARS` column, a `<var>_target` feature = that column's value at
+`t + horizon_hours` (same per-location `groupby(...).shift(-horizon_hours)` used
+for the target). These are ordinary inputs (no `feature_columns()` change); the
+existing dropna handles their NaN tail. Applied at every horizon incl. h=1 for
+interface consistency. Feature count 50 → 56. `train_multi_horizon.py` re-run,
+registering **v2** of `us_aqi_h24` / `h48` / `h72` (56 features); `us_aqi_next`
+untouched. In a real deployment `<var>_target` would come from a weather
+*forecast*; here it is the recorded value (same stand-in already used elsewhere).
+
+Best model per horizon, test split (before = Phase 2b, after = Phase 2c):
+
+| horizon | before RMSE / R²   | after RMSE / R²       | Δ R²   |
+| ------- | ------------------ | --------------------- | ------ |
+| +24h    | 5.292 / 0.7914     | 4.949 / **0.8176**    | +0.03  |
+| +48h    | 9.943 / 0.2637     | 7.910 / **0.5340**    | +0.27  |
+| +72h    | 11.905 / −0.0556   | 10.371 / **0.1990**   | +0.25  |
+
+(all three "after" models are XGBoost). Future weather barely moves +24h (as
+expected – 24h-ahead weather ≈ now), roughly doubles +48h R², and flips +72h
+from worse-than-mean to a real if modest signal. +72h R² ≈ 0.20 is still weak in
+absolute terms – 3-day-ahead AQI is genuinely hard, and the 14-day test window
+(337 rows) is small – but it is no longer noise.
+
+- [x] `dataset.py` – `<var>_target` weather features added in
+      `build_training_frame`; docstring updated.
+- [x] `train_multi_horizon.py` re-run – v2 models registered for all 3 horizons.
+- [x] `tests/smoke_training_pipeline.py` – added `check_weather_target_no_leakage`
+      (time-based lookup, horizon=48). All prior checks + the feature smoke test
+      still pass.
 
 Out of scope: dashboard, inference wiring, GitHub Actions, live weather-forecast
 fetching, LSTM.

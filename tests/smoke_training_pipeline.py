@@ -7,6 +7,8 @@ Covers the Phase 2 / 2b definition-of-done invariants:
   location's last row is dropped,
 * the horizon-parameterized target (``horizon_hours=24``) is the real value 24h
   later, and ``split_dataset`` works at a non-default horizon,
+* the ``<var>_target`` weather-at-target-time features are the real weather
+  values ``horizon`` hours later (no leakage),
 * the time-ordered train / val / test split has no overlap,
 * the local model registry round-trips a model + metadata and picks "best" by
   test RMSE.
@@ -109,6 +111,33 @@ def check_horizon_target_no_leakage() -> None:
     print("ok  horizon target: us_aqi_h24 is the real value 24h later, tail dropped")
 
 
+def check_weather_target_no_leakage() -> None:
+    horizon = 48
+    wcol = "temperature_2m"          # present in _synthetic()
+    tcol = f"{wcol}_target"
+
+    raw = _synthetic()
+    frame = build_training_frame(raw, horizon_hours=horizon)
+    assert tcol in frame.columns, tcol
+    assert tcol in split_dataset(frame, horizon_hours=horizon).feature_columns
+
+    for loc, g in frame.groupby("location"):
+        g = g.sort_values("time").reset_index(drop=True)
+        # {wcol}_target at time t must equal the real weather value at t + horizon
+        merged = g.merge(
+            g[["time", wcol]].rename(columns={"time": "t_future", wcol: "w_future"}),
+            left_on=g["time"] + pd.Timedelta(hours=horizon),
+            right_on="t_future",
+            how="inner",
+        )
+        assert len(merged) > 0
+        assert np.allclose(merged[tcol], merged["w_future"]), loc
+    assert not frame[tcol].isna().any()
+    print(
+        "ok  weather target: temperature_2m_target is the real value 48h later"
+    )
+
+
 def check_split_non_default_horizon() -> None:
     horizon = 24
     tgt = target_name(horizon)
@@ -172,6 +201,7 @@ def check_registry_roundtrip(tmp: Path) -> None:
 def main() -> int:
     check_target_no_leakage()
     check_horizon_target_no_leakage()
+    check_weather_target_no_leakage()
     check_split_non_default_horizon()
     check_split_no_overlap()
     import tempfile
