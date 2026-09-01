@@ -295,4 +295,75 @@ the app. No secrets are needed for the dashboard itself.
 Out of scope: actual deployment, GitHub Actions, the alerting logic itself (just
 the shared `aqi_scale` module), multi-location data.
 
+## Phase 4.5 – Real Hopsworks integration — done
+
+`store.py` and `registry.py` now always call a real Hopsworks project
+(`HOPSWORKS_API_KEY` / `HOPSWORKS_PROJECT_NAME` from `.env`). **The local
+parquet / joblib fallbacks were deleted outright**, not kept alongside — every
+public signature is unchanged, so `dataset.py`, `scripts/backfill.py`,
+`train.py`, `train_multi_horizon.py` and `predict.py` were untouched (except the
+one-line print fix in `train.py`).
+
+- `aqi_predictor/hopsworks_client.py` — lazily-created, module-level-cached
+  `hopsworks.login(...)` handle, shared by both modules. `store._project` /
+  `registry._project` are thin indirections over it that the smoke tests
+  monkeypatch. Two Windows workarounds live here: `cert_folder` is pointed at a
+  gitignored repo dir (the client default `/tmp` is un-creatable on Windows),
+  and a `<cwd-drive>:\tmp` directory is pre-created (the Kafka storage
+  connector's PEM export in `hopsworks_common/client/base.py` hardcodes
+  `/tmp` with no override).
+- `store.py` — feature group `aqi_features` v1, `primary_key=["location",
+  "time"]`, `event_time="time"`, offline-only, **DELTA (not stream),
+  `statistics_config=False`**, via `get_or_create_feature_group` (idempotent
+  re-runs). DELTA + the `hopsworks[python]` engine writes the feature group
+  directly from the client through delta-rs — no server-side Spark job. (The
+  default stream/HUDI path *does* run a Spark job; on this setup it needed the
+  Kafka `/tmp` hack to even start and then its inline statistics step failed
+  with a backend 500 — "Transaction marked for rollback". DELTA sidesteps all of
+  that, and statistics are off because the project doesn't use them.)
+  `insert_features` strips the tz off `time` before `fg.insert` (Hopsworks'
+  offline store rejects tz-aware timestamps — verified against the live
+  account); `get_feature_view` reads `fg.read()` back, re-attaches UTC, and
+  filters by `[start, end]` + `locations` in pandas exactly as before (empty
+  frame if nothing matches, sorted by `(location, time)`).
+- `registry.py` — Hopsworks Model Registry. `register_model` uploads a temp dir
+  of `model.joblib` + `metadata.json` (full nested metrics, same shape as
+  before) via `mr.python.create_model(...).save(...)`, passing only a **flat
+  numeric** metrics subset (`test_rmse`/`val_rmse`/…) to `create_model` for the
+  UI; returns the Hopsworks-assigned `m.version` (metadata.json's `version` is a
+  placeholder, overlaid on read). `list_versions` / `load_model` /
+  `load_best_model` download the artifact(s) and read `metadata.json` back, so
+  they return exactly what the local implementation did; `load_best_model` picks
+  lowest `test_rmse` from the models' attached flat metrics without downloading
+  every artifact.
+- **Existing feature data was migrated, not re-fetched.**
+  `scripts/migrate_to_hopsworks.py` (one-off, not wired into any pipeline) reads
+  `data/feature_store/location=*/data.parquet` and pushes it through the new
+  `store.insert_features`, then reads it back and checks the row counts /
+  time ranges match. `data/feature_store/` is left in place.
+- **Existing local models were NOT migrated.** `models/` is left as-is; the 4
+  model names (`us_aqi_next`, `us_aqi_h24/h48/h72`) were retrained fresh against
+  the Hopsworks-backed registry.
+- Tests: `tests/smoke_feature_pipeline.py` / `smoke_training_pipeline.py` no
+  longer redirect `FEATURE_STORE_DIR` / `MODELS_DIR` (gone). They monkeypatch
+  `store._project` / `registry._project` with small in-memory fakes (a
+  feature group with upsert-by-key semantics; a model registry keyed by
+  `(name, version)`), so the same round-trip assertions run with no network.
+
+**Dependency fallout (`requirements.txt`).** `hopsworks[python]==5.0.6` pins
+`pandas<2.4`, `numpy<2.5`, `protobuf<5`. To make one venv resolve:
+- `tensorflow==2.21.0` **dropped** — nothing imports it, and its
+  `protobuf>=6.31.1` pin is irreconcilable with Hopsworks. (`torch` stays; it is
+  still only used by the deferred, unbuildable `lstm_model.py`.)
+- `pandas` 3.0.5 → **2.3.3**, `streamlit` 1.62.0 → **1.59.1**.
+- `twofish` (transitive via `pyjks` via `hopsworks`) ships no wheel and there is
+  no C compiler on this machine; it is satisfied by a pure-Python import shim
+  (`twofish` 0.3.0) that raises if the cipher is ever actually exercised — the
+  API-key REST login path never touches it. If this project moves to a machine
+  with MSVC build tools, `pip install --force-reinstall --no-binary twofish
+  twofish` swaps in the real one.
+
+Out of scope: GitHub Actions/CI, Streamlit Cloud deploy, hazardous-AQI alerting,
+LSTM.
+
 ## Phase 5 – Automation (GitHub Actions) — not started

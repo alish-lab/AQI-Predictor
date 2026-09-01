@@ -6,20 +6,58 @@ Guards the two invariants from the Phase 1 definition of done:
 * engineered features never see a row's own future (no leakage),
 * missing-data handling interpolates short gaps and drops rows still missing a
   required column,
-and that the local feature store round-trips a time slice.
+and that the feature store round-trips a time slice (against an in-memory fake
+Hopsworks feature group - no network).
 """
 
 from __future__ import annotations
 
 import sys
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from aqi_predictor.feature_pipeline import store
 from aqi_predictor.feature_pipeline.features import build_features
+
+
+# --------------------------------------------------------------------------- #
+# In-memory stand-in for the Hopsworks feature group (no network in the tests).
+# Mirrors the upsert-by-primary-key semantics the real feature group has, so
+# check_store_roundtrip still exercises store.insert_features / get_feature_view.
+# --------------------------------------------------------------------------- #
+class _FakeFeatureGroup:
+    def __init__(self) -> None:
+        self._df: pd.DataFrame | None = None
+
+    def insert(self, df: pd.DataFrame, **_kw) -> None:
+        incoming = df.copy()
+        combined = incoming if self._df is None else pd.concat(
+            [self._df, incoming], ignore_index=True
+        )
+        self._df = (
+            combined.drop_duplicates(subset=["location", "time"], keep="last")
+            .reset_index(drop=True)
+        )
+
+    def read(self, **_kw) -> pd.DataFrame:
+        return self._df.copy() if self._df is not None else pd.DataFrame()
+
+
+class _FakeFeatureStore:
+    def __init__(self, fg: _FakeFeatureGroup) -> None:
+        self._fg = fg
+
+    def get_or_create_feature_group(self, *_a, **_kw) -> _FakeFeatureGroup:
+        return self._fg
+
+
+class _FakeProject:
+    def __init__(self, fs: _FakeFeatureStore) -> None:
+        self._fs = fs
+
+    def get_feature_store(self) -> _FakeFeatureStore:
+        return self._fs
 
 
 def _synthetic(n_hours: int = 240) -> pd.DataFrame:
@@ -82,19 +120,25 @@ def check_missing_data() -> None:
 def check_store_roundtrip() -> None:
     raw = _synthetic()
     feat, _ = build_features(raw)
-    with tempfile.TemporaryDirectory() as tmp:
-        store.FEATURE_STORE_DIR = Path(tmp)  # redirect storage for the test
-        store.insert_features(feat)
-        store.insert_features(feat)  # idempotent
 
-        full = store.get_feature_view("2024-01-01", "2030-01-01")
-        assert len(full) == len(feat), (len(full), len(feat))
-        assert not full.duplicated(["location", "time"]).any()
+    project = _FakeProject(_FakeFeatureStore(_FakeFeatureGroup()))
+    store._project = lambda: project  # swap the Hopsworks handle for a fake
 
-        sl = store.get_feature_view("2025-01-03", "2025-01-04", locations=["testville"])
-        assert sl["time"].min() >= pd.Timestamp("2025-01-03", tz="UTC")
-        assert sl["time"].max() <= pd.Timestamp("2025-01-04 23:59", tz="UTC")
-        assert len(sl) > 0
+    store.insert_features(feat)
+    store.insert_features(feat)  # idempotent (upsert by (location, time))
+
+    full = store.get_feature_view("2024-01-01", "2030-01-01")
+    assert len(full) == len(feat), (len(full), len(feat))
+    assert not full.duplicated(["location", "time"]).any()
+    assert str(full["time"].dt.tz) == "UTC"
+
+    sl = store.get_feature_view("2025-01-03", "2025-01-04", locations=["testville"])
+    assert sl["time"].min() >= pd.Timestamp("2025-01-03", tz="UTC")
+    assert sl["time"].max() <= pd.Timestamp("2025-01-04 23:59", tz="UTC")
+    assert len(sl) > 0
+
+    empty = store.get_feature_view("2000-01-01", "2000-01-02")
+    assert empty.empty
     print("ok  store: upsert idempotent, time slice bounded and non-empty")
 
 

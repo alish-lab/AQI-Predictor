@@ -115,7 +115,7 @@ def main() -> int:
         metrics={**best["metrics"], "algorithm": best_name, "selected_by": "test_rmse"},
         feature_list=splits.feature_columns,
     )
-    print(f"registered {MODEL_NAME} v{version} -> {registry._model_dir(MODEL_NAME)}")
+    print(f"registered {MODEL_NAME} v{version} in the Hopsworks model registry")
 
     comparison = {
         "generated_at": pd.Timestamp.now(tz="UTC").isoformat(),

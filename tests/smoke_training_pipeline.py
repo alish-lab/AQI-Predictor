@@ -10,13 +10,15 @@ Covers the Phase 2 / 2b definition-of-done invariants:
 * the ``<var>_target`` weather-at-target-time features are the real weather
   values ``horizon`` hours later (no leakage),
 * the time-ordered train / val / test split has no overlap,
-* the local model registry round-trips a model + metadata and picks "best" by
-  test RMSE.
+* the model registry round-trips a model + full nested metadata and picks "best"
+  by test RMSE (against an in-memory fake Hopsworks registry - no network).
 """
 
 from __future__ import annotations
 
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +26,65 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression
 
 from aqi_predictor.training_pipeline import dataset, registry
+
+
+# --------------------------------------------------------------------------- #
+# In-memory stand-in for the Hopsworks Model Registry (no network in the tests).
+# Keyed by (name, version); artifacts are copied to a temp dir per version so
+# registry.load_model / load_best_model still exercise the real download + read
+# + joblib.load path.
+# --------------------------------------------------------------------------- #
+class _FakeModel:
+    def __init__(self, mr: "_FakeModelRegistry", name: str, metrics: dict) -> None:
+        self._mr = mr
+        self.name = name
+        self.training_metrics = dict(metrics)
+        self.version: int | None = None
+        self._dir: Path | None = None
+
+    def save(self, src_dir: str) -> "_FakeModel":
+        self.version = self._mr._next_version(self.name)
+        dst = Path(tempfile.mkdtemp(prefix=f"fakemr_{self.name}_v{self.version}_"))
+        for item in Path(src_dir).iterdir():
+            shutil.copy2(item, dst / item.name)
+        self._dir = dst
+        self._mr._store[(self.name, self.version)] = self
+        return self
+
+    def download(self) -> str:
+        return str(self._dir)
+
+
+class _FakeModelRegistryNS:
+    def __init__(self, mr: "_FakeModelRegistry") -> None:
+        self._mr = mr
+
+    def create_model(self, name: str, metrics: dict, description: str = "") -> _FakeModel:
+        return _FakeModel(self._mr, name, metrics)
+
+
+class _FakeModelRegistry:
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, int], _FakeModel] = {}
+        self.python = _FakeModelRegistryNS(self)
+
+    def _next_version(self, name: str) -> int:
+        existing = [v for (n, v) in self._store if n == name]
+        return (max(existing) + 1) if existing else 1
+
+    def get_models(self, name: str) -> list[_FakeModel]:
+        return [m for (n, _v), m in self._store.items() if n == name]
+
+    def get_model(self, name: str, version: int) -> _FakeModel | None:
+        return self._store.get((name, version))
+
+
+class _FakeProject:
+    def __init__(self, mr: _FakeModelRegistry) -> None:
+        self._mr = mr
+
+    def get_model_registry(self) -> _FakeModelRegistry:
+        return self._mr
 from aqi_predictor.training_pipeline.dataset import (
     SPLIT_DAYS,
     TARGET,
@@ -173,8 +234,9 @@ def check_split_no_overlap() -> None:
     print("ok  split: train < val < test per location, no overlap, ~14d test window")
 
 
-def check_registry_roundtrip(tmp: Path) -> None:
-    registry.MODELS_DIR = tmp  # redirect the registry for the test
+def check_registry_roundtrip() -> None:
+    project = _FakeProject(_FakeModelRegistry())
+    registry._project = lambda: project  # swap the Hopsworks handle for a fake
 
     X = np.arange(20).reshape(-1, 2).astype(float)
     y = X.sum(axis=1)
@@ -183,18 +245,33 @@ def check_registry_roundtrip(tmp: Path) -> None:
     feats = ["f0", "f1"]
 
     v1 = registry.register_model(
-        "demo", worse, {"val": {"rmse": 3.0}, "test": {"rmse": 5.0}}, feats
+        "demo", worse,
+        {"val": {"rmse": 3.0, "mae": 2.0, "r2": 0.5},
+         "test": {"rmse": 5.0, "mae": 4.0, "r2": 0.3},
+         "algorithm": "linreg"},
+        feats,
     )
     v2 = registry.register_model(
-        "demo", better, {"val": {"rmse": 2.0}, "test": {"rmse": 1.0}}, feats
+        "demo", better,
+        {"val": {"rmse": 2.0, "mae": 1.5, "r2": 0.7},
+         "test": {"rmse": 1.0, "mae": 0.8, "r2": 0.9},
+         "algorithm": "linreg"},
+        feats,
     )
     assert (v1, v2) == (1, 2)
+
+    assert [m["version"] for m in registry.list_versions("demo")] == [1, 2]
 
     model, meta = registry.load_best_model("demo")
     assert meta["version"] == 2, meta["version"]
     assert meta["metrics"]["test"]["rmse"] == 1.0
+    assert meta["metrics"]["algorithm"] == "linreg"  # nested dict preserved
     assert meta["feature_list"] == feats
     np.testing.assert_allclose(model.predict(X), better.predict(X))
+
+    m1, meta1 = registry.load_model("demo", 1)
+    assert meta1["version"] == 1
+    np.testing.assert_allclose(m1.predict(X), worse.predict(X))
     print("ok  registry: round-trips model + metadata, load_best picks lowest test RMSE")
 
 
@@ -204,10 +281,7 @@ def main() -> int:
     check_weather_target_no_leakage()
     check_split_non_default_horizon()
     check_split_no_overlap()
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp:
-        check_registry_roundtrip(Path(tmp))
+    check_registry_roundtrip()
 
     print("\nall training-pipeline smoke checks passed")
     return 0
