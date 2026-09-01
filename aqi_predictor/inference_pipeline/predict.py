@@ -28,6 +28,7 @@ from aqi_predictor.training_pipeline import registry
 HORIZONS = (1, 24, 48, 72)
 _TARGET_SUFFIX = "_target"
 _HISTORY_DAYS = 4
+RECENT_HOURS = 48  # how much observed history forecast() returns under "recent"
 
 
 def model_name(horizon_hours: int) -> str:
@@ -35,15 +36,16 @@ def model_name(horizon_hours: int) -> str:
     return "us_aqi_next" if horizon_hours == 1 else f"us_aqi_h{horizon_hours}"
 
 
-def _now_row(location_name: str) -> pd.Series:
-    """The most recent fully-featured row at or before the current wall-clock hour.
+def _current_and_history(location_name: str) -> tuple[pd.Series, pd.DataFrame]:
+    """The most recent fully-featured row at or before the current wall-clock
+    hour, plus the observed history it came from (rows ``time <= now``).
 
     Built from the last ``_HISTORY_DAYS`` days of history run through
     ``features.build_features`` (the same engineering the feature store uses),
-    then filtered to ``time <= now`` before taking the last row. Open-Meteo's
-    air-quality endpoint forecasts the remainder of the current UTC day, so the
-    unfiltered last row can be up to ~23h in the future; this returns a real
-    recent hour instead (same guard ``fetch.latest_hour`` uses).
+    then filtered to ``time <= now``. Open-Meteo's air-quality endpoint forecasts
+    the remainder of the current UTC day, so the unfiltered last row can be up to
+    ~23h in the future; the filter keeps only real recent hours (same guard
+    ``fetch.latest_hour`` uses).
     """
     now = pd.Timestamp.now(tz="UTC")
     start = (now - pd.Timedelta(days=_HISTORY_DAYS)).date().isoformat()
@@ -58,14 +60,14 @@ def _now_row(location_name: str) -> pd.Series:
         )
 
     current_hour = now.floor("h")
-    usable = featured[featured["time"] <= current_hour]
-    if usable.empty:
+    observed = featured[featured["time"] <= current_hour].reset_index(drop=True)
+    if observed.empty:
         raise RuntimeError(
             f"no fully-featured row for {location_name!r} at or before "
             f"{current_hour} (fetched {len(featured)} rows spanning "
             f"{featured['time'].min()} .. {featured['time'].max()})"
         )
-    return usable.iloc[-1]
+    return observed.iloc[-1], observed
 
 
 def build_input_row(
@@ -115,7 +117,7 @@ def build_input_row(
 
 def forecast(location_name: str) -> dict:
     """Predict US AQI at every horizon in :data:`HORIZONS` for ``location_name``."""
-    now_row = _now_row(location_name)
+    now_row, observed = _current_and_history(location_name)
     now_time = pd.Timestamp(now_row["time"])
     weather = fetch.forecast_ahead(location_name, hours_ahead=max(HORIZONS))
 
@@ -135,6 +137,13 @@ def forecast(location_name: str) -> dict:
             }
         )
 
+    recent_cut = now_time - pd.Timedelta(hours=RECENT_HOURS)
+    recent = [
+        {"time": t.isoformat(), "us_aqi": round(float(v), 1)}
+        for t, v in zip(observed["time"], observed["us_aqi"])
+        if t >= recent_cut
+    ]
+
     return {
         "location": location_name,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -142,6 +151,7 @@ def forecast(location_name: str) -> dict:
             "time": now_time.isoformat(),
             "us_aqi": round(float(now_row["us_aqi"]), 1),
         },
+        "recent": recent,
         "forecasts": forecasts,
     }
 

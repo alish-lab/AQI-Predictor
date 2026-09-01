@@ -10,7 +10,8 @@ project is organised as a set of pipelines:
   (`dataset.py`, `train.py`, `train_multi_horizon.py`, `registry.py`).
 - **inference_pipeline** – live multi-horizon forecast: current conditions +
   Open-Meteo weather forecast → `us_aqi` at +1h/+24h/+48h/+72h (`predict.py`).
-- **dashboard** – visualise forecasts (to be built).
+- **dashboard** – Streamlit app over the live forecast: current AQI + category
+  badge, 48h trend, 3-day forecast (`app.py`).
 
 The schema is multi-location from the start (every row carries a `location`
 key), though only Karachi is active. See [PROGRESS.md](PROGRESS.md) for the phase
@@ -21,6 +22,7 @@ tracker.
 ```
 aqi_predictor/
   config.py            LOCATIONS, paths, constants, .env loading
+  aqi_scale.py         US AQI category + colour lookup (shared, dependency-free)
   feature_pipeline/
     fetch.py           Open-Meteo air-quality + weather, merged on (location, time)
     features.py        engineered features + missing-data handling
@@ -33,13 +35,15 @@ aqi_predictor/
     lstm_model.py       old code, deferred (currently unbuildable)
   inference_pipeline/
     predict.py         live +1h/+24h/+48h/+72h forecast (real weather forecast)
-  dashboard/           (placeholder)
+  dashboard/
+    app.py             Streamlit dashboard over predict.forecast()
 scripts/
   backfill.py          historical backfill: fetch -> features -> store
 tests/
   smoke_feature_pipeline.py     offline invariant checks (run with plain python)
   smoke_training_pipeline.py    offline invariant checks (run with plain python)
   smoke_inference_pipeline.py   offline invariant checks (run with plain python)
+  smoke_dashboard.py            offline invariant checks (run with plain python)
 data/                  local data, git-ignored (raw pulls + feature store)
 models/                local model registry + reports, git-ignored
 ```
@@ -113,5 +117,8 @@ Model artifacts and the `training_comparison*.json` reports land in `models/`
 # +1h / +24h / +48h / +72h
 python -m aqi_predictor.inference_pipeline.predict --location karachi
 python -m aqi_predictor.inference_pipeline.predict --location karachi --json
+
+# Dashboard (same live forecast, in the browser)
+streamlit run aqi_predictor/dashboard/app.py
 ```
 

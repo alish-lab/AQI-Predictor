@@ -247,6 +247,52 @@ and each target time is exactly the horizon out.
 Out of scope: dashboard/UI, GitHub Actions, hazardous-AQI alerting, LSTM, more
 horizons.
 
-## Phase 4 – Dashboard — not started
+## Phase 4 – Streamlit dashboard — done
+
+`aqi_predictor/dashboard/app.py` is a Streamlit app over the live pipeline (no
+mock data):
+
+- location dropdown from `config.LOCATIONS` (currently just Karachi);
+- `@st.cache_data(ttl=1200)` around `predict.forecast(location_name)` — the
+  location is an explicit argument, so the cache keys on it and switching cities
+  can never show a stale result for the wrong one;
+- current US AQI value + a colour badge from the new shared
+  `aqi_predictor/aqi_scale.py` (`aqi_category(value) -> (label, colour_hex)`,
+  standard US EPA breakpoints, dependency-free so hazardous-AQI alerting can
+  reuse it later);
+- a line chart of the last 48h of observed `us_aqi` and a line chart of the
+  4-point forecast, plus a forecast table (horizon, target time, value,
+  category, model + version);
+- the cached call is wrapped in `try/except`; any pipeline failure renders
+  `st.error(...)` with the exception message instead of a traceback.
+
+`predict.forecast()` gained a `"recent"` field — `[{time, us_aqi}, …]` for the
+last `RECENT_HOURS` (48) of *observed* history, taken from the frame already
+fetched for the "now" row (no second live call). `_now_row` became
+`_current_and_history`, returning `(now_row, observed_frame)`.
+
+`requirements.txt`: `+ streamlit==1.62.0`.
+
+Verified with `streamlit.testing.v1.AppTest` against the real pipeline: renders
+title, badge (AQI 61 → "Moderate", yellow), both line charts, and the 4-row
+forecast table with no exception; a forced `predict.forecast` failure renders a
+friendly `st.error` and skips the rest of the page.
+
+Run locally: `streamlit run aqi_predictor/dashboard/app.py`
+
+**Deployment is a manual step, outside Claude Code.** After this is pushed,
+connect the GitHub repo on share.streamlit.io (main module
+`aqi_predictor/dashboard/app.py`), which installs `requirements.txt` and serves
+the app. No secrets are needed for the dashboard itself.
+
+- [x] `aqi_predictor/aqi_scale.py` – shared `aqi_category()`, no Streamlit import.
+- [x] `predict.forecast()` – added `"recent"` (reuses the already-fetched frame).
+- [x] `aqi_predictor/dashboard/app.py` – Streamlit app, cached per location,
+      error-guarded.
+- [x] `tests/smoke_dashboard.py` – `aqi_category` boundary table + forecast-dict
+      shape/timestamp validation. All existing smoke tests still pass.
+
+Out of scope: actual deployment, GitHub Actions, the alerting logic itself (just
+the shared `aqi_scale` module), multi-location data.
 
 ## Phase 5 – Automation (GitHub Actions) — not started
