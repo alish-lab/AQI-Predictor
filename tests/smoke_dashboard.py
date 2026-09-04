@@ -1,4 +1,4 @@
-"""Offline smoke checks for the dashboard layer (no pytest, no Streamlit, no network).
+"""Offline smoke checks for the dashboard layer (no pytest, no network).
 
 Run:  python tests/smoke_dashboard.py
 
@@ -6,16 +6,26 @@ Covers:
 * ``aqi_scale.aqi_category`` maps every US AQI breakpoint (and each boundary
   value) to the right label,
 * a ``forecast()``-shaped dict's ``recent`` / ``forecasts`` fields are
-  well-formed - expected keys, parseable ISO timestamps.
+  well-formed - expected keys, parseable ISO timestamps,
+* the Streamlit app renders end to end against a stubbed ``predict.forecast``
+  (via ``AppTest``, no network): no exception, the four stat cards carry the
+  right AQI numbers + category, the details expander holds all four rows, and a
+  pipeline failure is caught and shown as ``st.error`` rather than crashing.
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
 from aqi_predictor.aqi_scale import aqi_category
+
+_APP_PATH = str(
+    Path(__file__).resolve().parents[1] / "aqi_predictor" / "dashboard" / "app.py"
+)
 
 _EXPECTED_LABELS = {
     0: "Good",
@@ -117,9 +127,50 @@ def check_forecast_dict_shape() -> None:
     print("ok  forecast dict: recent / forecasts well-formed, timestamps parse")
 
 
+def check_app_renders() -> None:
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    from aqi_predictor.inference_pipeline import predict
+
+    result = _synthetic_forecast()
+
+    st.cache_data.clear()
+    with patch.object(predict, "forecast", return_value=result):
+        at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
+
+    assert not at.exception, at.exception
+
+    # the four stat cards are unsafe-HTML markdown blocks; each carries its number
+    card_html = " ".join(m.value for m in at.markdown if "aqi-card" in m.value)
+    assert "Now" in card_html and "+24h" in card_html and "+72h" in card_html
+    for label, value in (
+        ("Now", result["current"]["us_aqi"]),
+        *((f"+{f['horizon_hours']}h", f["predicted_us_aqi"]) for f in result["forecasts"][1:]),
+    ):
+        assert f">{value:.0f}<" in card_html, (label, value, card_html[:300])
+    assert "Moderate" in card_html  # every synthetic value sits in one category
+
+    # the details expander holds the full 4-row forecast table
+    assert len(at.dataframe) == 1
+    assert len(at.dataframe[0].value) == 4
+    assert list(at.dataframe[0].value["horizon_hours"]) == [1, 24, 48, 72]
+
+    # a pipeline failure is caught, not raised
+    st.cache_data.clear()
+    with patch.object(predict, "forecast", side_effect=RuntimeError("boom")):
+        at_err = AppTest.from_file(_APP_PATH, default_timeout=60).run()
+    assert not at_err.exception
+    assert any("Could not load" in e.value for e in at_err.error)
+    assert not at_err.dataframe  # render() is skipped on error
+
+    print("ok  app: cards + charts + expander render, errors surface as st.error")
+
+
 def main() -> int:
     check_aqi_category_boundaries()
     check_forecast_dict_shape()
+    check_app_renders()
     print("\nall dashboard smoke checks passed")
     return 0
 

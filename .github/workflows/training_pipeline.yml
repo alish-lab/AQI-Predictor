@@ -1,0 +1,50 @@
+name: training-pipeline
+
+# Daily: retrain the next-hour and multi-horizon US AQI models against the
+# current Hopsworks feature store and register a new version of each. After each
+# training step we log which version `predict.py` now serves - `load_best_model`
+# always keeps the lowest-test-RMSE version ever registered, so a bad run can't
+# regress serving; this just makes the outcome visible (no promotion gating).
+on:
+  schedule:
+    - cron: "40 2 * * *"   # daily at 02:40 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: training-pipeline
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+      HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Train next-hour model (us_aqi_next)
+        run: python -m aqi_predictor.training_pipeline.train
+
+      - name: Report serving version (next-hour)
+        run: python -m scripts.check_registry_after_training --name us_aqi_next
+
+      - name: Train multi-horizon models (us_aqi_h24 / h48 / h72)
+        run: python -m aqi_predictor.training_pipeline.train_multi_horizon
+
+      - name: Report serving versions (multi-horizon)
+        run: >
+          python -m scripts.check_registry_after_training
+          --name us_aqi_h24 --name us_aqi_h48 --name us_aqi_h72
