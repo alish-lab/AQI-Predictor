@@ -20,10 +20,16 @@ import datetime as dt
 import json
 
 import pandas as pd
+import shap
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
 
 from aqi_predictor.feature_pipeline import fetch
 from aqi_predictor.feature_pipeline.features import build_features
 from aqi_predictor.training_pipeline import registry
+
+_TREE_MODEL_TYPES = (RandomForestRegressor, XGBRegressor)
+_TOP_N_FEATURES = 5
 
 HORIZONS = (1, 24, 48, 72)
 _TARGET_SUFFIX = "_target"
@@ -115,6 +121,26 @@ def build_input_row(
     return row.astype("float64")
 
 
+def _local_shap_top_features(model, x: pd.DataFrame) -> list[dict] | None:
+    """Top ``_TOP_N_FEATURES`` features by |SHAP value| for one input row.
+
+    ``None`` for non-tree models (Ridge etc.) - only
+    ``RandomForestRegressor``/``XGBRegressor`` get a ``shap.TreeExplainer``.
+    """
+    if not isinstance(model, _TREE_MODEL_TYPES):
+        return None
+    shap_values = shap.TreeExplainer(model).shap_values(x)[0]
+    ranked = sorted(
+        zip(x.columns, shap_values, x.iloc[0]),
+        key=lambda t: abs(t[1]),
+        reverse=True,
+    )[:_TOP_N_FEATURES]
+    return [
+        {"feature": feat, "shap_value": float(sv), "value": float(val)}
+        for feat, sv, val in ranked
+    ]
+
+
 def forecast(location_name: str) -> dict:
     """Predict US AQI at every horizon in :data:`HORIZONS` for ``location_name``."""
     now_row, observed = _current_and_history(location_name)
@@ -134,6 +160,8 @@ def forecast(location_name: str) -> dict:
                 "predicted_us_aqi": round(predicted, 1),
                 "model_name": meta["name"],
                 "model_version": meta["version"],
+                "top_features": _local_shap_top_features(model, x),
+                "shap_importance": meta.get("shap_importance"),
             }
         )
 

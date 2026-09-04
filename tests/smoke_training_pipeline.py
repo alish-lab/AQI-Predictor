@@ -23,9 +23,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 
 from aqi_predictor.training_pipeline import dataset, registry
+from aqi_predictor.training_pipeline.train import compute_shap_importance
 
 
 # --------------------------------------------------------------------------- #
@@ -250,13 +252,16 @@ def check_registry_roundtrip() -> None:
          "test": {"rmse": 5.0, "mae": 4.0, "r2": 0.3},
          "algorithm": "linreg"},
         feats,
+        # no shap_importance -> default None, must not break registration
     )
+    shap_importance = {"f0": 0.7, "f1": 0.3}
     v2 = registry.register_model(
         "demo", better,
         {"val": {"rmse": 2.0, "mae": 1.5, "r2": 0.7},
          "test": {"rmse": 1.0, "mae": 0.8, "r2": 0.9},
          "algorithm": "linreg"},
         feats,
+        shap_importance=shap_importance,
     )
     assert (v1, v2) == (1, 2)
 
@@ -267,12 +272,61 @@ def check_registry_roundtrip() -> None:
     assert meta["metrics"]["test"]["rmse"] == 1.0
     assert meta["metrics"]["algorithm"] == "linreg"  # nested dict preserved
     assert meta["feature_list"] == feats
+    assert meta["shap_importance"] == shap_importance  # round-trips through the registry
     np.testing.assert_allclose(model.predict(X), better.predict(X))
 
     m1, meta1 = registry.load_model("demo", 1)
     assert meta1["version"] == 1
+    assert meta1["shap_importance"] is None  # default stays None when omitted
     np.testing.assert_allclose(m1.predict(X), worse.predict(X))
-    print("ok  registry: round-trips model + metadata, load_best picks lowest test RMSE")
+
+    # v3 ties v2 on test RMSE -> tie must break toward the higher version, not
+    # whichever the (fake) API happened to list first.
+    tied = LinearRegression().fit(X, y + 0.0)
+    v3 = registry.register_model(
+        "demo", tied,
+        {"val": {"rmse": 2.0, "mae": 1.5, "r2": 0.7},
+         "test": {"rmse": 1.0, "mae": 0.8, "r2": 0.9},  # tied with v2
+         "algorithm": "linreg"},
+        feats,
+    )
+    assert v3 == 3
+    _model3, meta3 = registry.load_best_model("demo")
+    assert meta3["version"] == 3, meta3["version"]  # higher version wins the tie
+
+    # v4 is a near-tie with v3 (RMSE differs only past the 6th decimal, like
+    # RandomForest's run-to-run float noise) -> must still count as a tie.
+    near_tied = LinearRegression().fit(X, y + 0.0)
+    v4 = registry.register_model(
+        "demo", near_tied,
+        {"val": {"rmse": 2.0, "mae": 1.5, "r2": 0.7},
+         "test": {"rmse": 1.0 + 5e-9, "mae": 0.8, "r2": 0.9},  # near-tied with v3
+         "algorithm": "linreg"},
+        feats,
+    )
+    assert v4 == 4
+    _model4, meta4 = registry.load_best_model("demo")
+    assert meta4["version"] == 4, meta4["version"]  # rounded tie -> higher version wins
+
+    print("ok  registry: round-trips model + metadata (incl. shap_importance), "
+          "load_best picks lowest test RMSE (ties -> higher version)")
+
+
+def check_shap_importance() -> None:
+    X = pd.DataFrame(
+        np.arange(40).reshape(-1, 2).astype(float), columns=["f0", "f1"]
+    )
+    y = X["f0"] + 2 * X["f1"]
+
+    tree_model = RandomForestRegressor(n_estimators=10, random_state=0).fit(X, y)
+    importance = compute_shap_importance(tree_model, X)
+    assert importance is not None
+    assert set(importance) == {"f0", "f1"}
+    assert all(isinstance(v, float) and v >= 0 for v in importance.values())
+
+    linear_model = LinearRegression().fit(X, y)
+    assert compute_shap_importance(linear_model, X) is None
+    print("ok  shap: tree model -> mean |SHAP| per feature, non-tree model -> None")
 
 
 def main() -> int:
@@ -282,6 +336,7 @@ def main() -> int:
     check_split_non_default_horizon()
     check_split_no_overlap()
     check_registry_roundtrip()
+    check_shap_importance()
 
     print("\nall training-pipeline smoke checks passed")
     return 0

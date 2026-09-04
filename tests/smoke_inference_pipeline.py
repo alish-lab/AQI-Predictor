@@ -17,8 +17,14 @@ import sys
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 
-from aqi_predictor.inference_pipeline.predict import build_input_row, model_name
+from aqi_predictor.inference_pipeline.predict import (
+    _local_shap_top_features,
+    build_input_row,
+    model_name,
+)
 
 NOW = pd.Timestamp("2025-06-01T12:00:00Z")
 
@@ -131,12 +137,39 @@ def check_uncovered_target_time_raises() -> None:
     print("ok  uncovered target time: raises a clear error")
 
 
+def check_local_shap_top_features() -> None:
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(
+        {"f0": rng.normal(size=40), "f1": rng.normal(size=40), "f2": rng.normal(size=40)}
+    )
+    y = X["f0"] * 3 - X["f1"] * 2 + X["f2"] * 0.1
+    row = X.iloc[[0]]
+
+    tree_model = RandomForestRegressor(n_estimators=200, random_state=0).fit(X, y)
+    top = _local_shap_top_features(tree_model, row)
+    assert top is not None
+    assert 1 <= len(top) <= 3
+    assert all({"feature", "shap_value", "value"} == set(item) for item in top)
+    assert {item["feature"] for item in top} <= {"f0", "f1", "f2"}
+    # descending by |shap_value|
+    abs_values = [abs(item["shap_value"]) for item in top]
+    assert abs_values == sorted(abs_values, reverse=True)
+    # f0/f1 dominate the target (coefficients 3 and -2) vs f2 (0.1) -> top-ranked
+    # feature must be one of the two large-coefficient ones, not the noise feature
+    assert top[0]["feature"] in {"f0", "f1"}
+
+    linear_model = LinearRegression().fit(X, y)
+    assert _local_shap_top_features(linear_model, row) is None  # non-tree -> no crash
+    print("ok  local shap: tree model -> ranked top features, non-tree model -> None (no crash)")
+
+
 def main() -> int:
     check_model_name()
     check_columns_match_feature_list()
     check_target_columns_use_forecast()
     check_missing_feature_raises()
     check_uncovered_target_time_raises()
+    check_local_shap_top_features()
     print("\nall inference-pipeline smoke checks passed")
     return 0
 

@@ -43,6 +43,13 @@ _META_FILE = "metadata.json"
 
 _FLAT_METRIC_KEYS = ("rmse", "mae", "r2")
 
+# Decimal places test RMSE is rounded to before comparing "best" versions.
+# RandomForest/XGBoost with n_jobs=-1 can produce run-to-run floating-point
+# noise on the order of 1e-14 from parallel reduction order even with a fixed
+# random_state and identical data - without rounding, that noise (not a real
+# accuracy difference) breaks the version tie-break below.
+_RMSE_COMPARISON_PRECISION = 6
+
 
 def _project():
     """Hopsworks project handle. Separate function so tests can monkeypatch it."""
@@ -109,8 +116,15 @@ def register_model(
     model: Any,
     metrics: dict,
     feature_list: list[str],
+    shap_importance: dict[str, float] | None = None,
 ) -> int:
-    """Persist ``model`` as the next version of ``name``; return the version int."""
+    """Persist ``model`` as the next version of ``name``; return the version int.
+
+    ``shap_importance`` is an optional ``{feature: mean_abs_shap_value}`` dict
+    (tree-based models only) stored in ``metadata.json`` for the dashboard's
+    global feature-importance chart. ``None`` for models without a SHAP
+    explainer (e.g. Ridge).
+    """
     mr = _model_registry()
 
     metadata = {
@@ -122,6 +136,7 @@ def register_model(
         "model_class": f"{type(model).__module__}.{type(model).__qualname__}",
         "metrics": metrics,
         "feature_list": list(feature_list),
+        "shap_importance": shap_importance,
     }
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -159,7 +174,15 @@ def load_model(name: str, version: int) -> tuple[Any, dict]:
 
 
 def load_best_model(name: str) -> tuple[Any, dict]:
-    """Return ``(model, metadata)`` for the version with the lowest test RMSE."""
+    """Return ``(model, metadata)`` for the version with the lowest test RMSE.
+
+    Test RMSE is rounded to :data:`_RMSE_COMPARISON_PRECISION` decimals before
+    comparing, so run-to-run floating-point noise (e.g. from RandomForest's
+    parallel reduction order) doesn't masquerade as a real accuracy
+    difference. Ties after rounding break toward the *higher* version number,
+    so a newer version - such as one with ``shap_importance`` added - reliably
+    wins over an older tied one instead of depending on API return order.
+    """
     models = _model_registry().get_models(name)
     if not models:
         raise FileNotFoundError(f"no registered models named {name!r}")
@@ -173,9 +196,15 @@ def load_best_model(name: str) -> tuple[Any, dict]:
 
     scored = [(m, _flat_test_rmse(m)) for m in models]
     if any(score != float("inf") for _m, score in scored):
-        best_model = min(scored, key=lambda pair: pair[1])[0]
+        best_model = min(
+            scored,
+            key=lambda pair: (round(pair[1], _RMSE_COMPARISON_PRECISION), -int(pair[0].version)),
+        )[0]
         return _download(best_model)
 
     # SDK did not expose flat metrics without a download - compare artifacts.
-    best_meta = min(list_versions(name), key=_test_rmse)
+    best_meta = min(
+        list_versions(name),
+        key=lambda m: (round(_test_rmse(m), _RMSE_COMPARISON_PRECISION), -int(m["version"])),
+    )
     return load_model(name, best_meta["version"])

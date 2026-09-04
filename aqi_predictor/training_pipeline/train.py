@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+import shap
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
@@ -56,6 +57,20 @@ def build_models() -> dict[str, object]:
 
 def evaluate(model, X: pd.DataFrame, y: pd.Series) -> dict[str, float]:
     return regression_metrics(y, model.predict(X))
+
+
+def compute_shap_importance(model, X_test: pd.DataFrame) -> dict[str, float] | None:
+    """Mean |SHAP value| per feature for tree-based ``model``, else ``None``.
+
+    Ridge is fit inside a ``Pipeline`` so it never matches either isinstance
+    check here. XGBRegressor/RandomForestRegressor are the only estimators
+    :func:`shap.TreeExplainer` is used for - no background sample needed.
+    """
+    if not isinstance(model, (RandomForestRegressor, XGBRegressor)):
+        return None
+    shap_values = shap.TreeExplainer(model).shap_values(X_test)
+    mean_abs = pd.DataFrame(shap_values, columns=X_test.columns).abs().mean()
+    return {col: float(val) for col, val in mean_abs.items()}
 
 
 def train_all(splits: Splits) -> dict[str, dict]:
@@ -109,11 +124,15 @@ def main() -> int:
     print(f"\nbest by test RMSE: {best_name} "
           f"(RMSE={best['metrics']['test']['rmse']:.3f})")
 
+    X_test, _y_test = splits.xy("test")
+    shap_importance = compute_shap_importance(best["model"], X_test)
+
     version = registry.register_model(
         MODEL_NAME,
         best["model"],
         metrics={**best["metrics"], "algorithm": best_name, "selected_by": "test_rmse"},
         feature_list=splits.feature_columns,
+        shap_importance=shap_importance,
     )
     print(f"registered {MODEL_NAME} v{version} in the Hopsworks model registry")
 

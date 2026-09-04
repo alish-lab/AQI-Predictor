@@ -203,6 +203,90 @@ def _forecast_chart(fc: pd.DataFrame) -> alt.LayerChart:
     return alt.layer(bars, labels).properties(height=260).configure_view(stroke=None)
 
 
+_SHAP_UP_COLOUR = "#e2434d"   # pushes predicted AQI up (worse air)
+_SHAP_DOWN_COLOUR = "#3b82f6"  # pushes predicted AQI down (better air)
+
+
+def _local_shap_chart(top_features: list[dict]) -> alt.Chart:
+    """Horizontal bar chart of one forecast's top-5 local SHAP features."""
+    df = pd.DataFrame(top_features)
+    df["direction"] = df["shap_value"].map(
+        lambda v: "pushes AQI up" if v > 0 else "pushes AQI down"
+    )
+    order = df.assign(_abs=df["shap_value"].abs()).sort_values("_abs")["feature"].tolist()
+    colour_scale = alt.Scale(
+        domain=["pushes AQI up", "pushes AQI down"],
+        range=[_SHAP_UP_COLOUR, _SHAP_DOWN_COLOUR],
+    )
+    return (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            y=alt.Y("feature:N", sort=order, title=None),
+            x=alt.X("shap_value:Q", title="SHAP value (impact on predicted AQI)"),
+            color=alt.Color("direction:N", scale=colour_scale, legend=alt.Legend(title=None)),
+            tooltip=[
+                alt.Tooltip("feature:N", title="feature"),
+                alt.Tooltip("value:Q", title="input value", format=".2f"),
+                alt.Tooltip("shap_value:Q", title="SHAP value", format="+.2f"),
+            ],
+        )
+        .properties(height=180)
+        .configure_view(stroke=None)
+    )
+
+
+def _global_shap_chart(shap_importance: dict[str, float], top_n: int = 10) -> alt.Chart:
+    """Horizontal bar chart of a model's global mean(|SHAP|) feature importance."""
+    ranked = sorted(shap_importance.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    df = pd.DataFrame(ranked, columns=["feature", "mean_abs_shap"])
+    order = df.sort_values("mean_abs_shap")["feature"].tolist()
+    return (
+        alt.Chart(df)
+        .mark_bar(color="#6b7280")
+        .encode(
+            y=alt.Y("feature:N", sort=order, title=None),
+            x=alt.X("mean_abs_shap:Q", title="mean |SHAP value|"),
+            tooltip=[
+                alt.Tooltip("feature:N", title="feature"),
+                alt.Tooltip("mean_abs_shap:Q", title="mean |SHAP|", format=".3f"),
+            ],
+        )
+        .properties(height=220)
+        .configure_view(stroke=None)
+    )
+
+
+def _render_explain_section(fc: pd.DataFrame) -> None:
+    """'Explain this forecast' section: local SHAP bars + a global importance chart.
+
+    Picked via a horizon selector rather than one chart per card, so this stays
+    out of the top stat-card row entirely.
+    """
+    st.subheader("Explain this forecast")
+    horizon_labels = list(fc["horizon_label"])
+    chosen_label = st.selectbox("Horizon", horizon_labels, index=0, key="shap_horizon")
+    chosen = fc.loc[fc["horizon_label"] == chosen_label].iloc[0]
+
+    col_local, col_global = st.columns(2)
+    with col_local:
+        st.markdown(f"**Top features - {chosen_label} local impact**")
+        top_features = chosen.get("top_features")
+        if top_features:
+            st.altair_chart(_local_shap_chart(top_features), width="stretch")
+        else:
+            st.caption(
+                f"No SHAP explanation available for {chosen['model']} (non-tree model)."
+            )
+    with col_global:
+        st.markdown(f"**Global feature importance - {chosen['model_name']}**")
+        shap_importance = chosen.get("shap_importance")
+        if shap_importance:
+            st.altair_chart(_global_shap_chart(shap_importance), width="stretch")
+        else:
+            st.caption(f"No global SHAP importance available for {chosen['model_name']}.")
+
+
 def _render(result: dict) -> None:
     cur = result["current"]
     by_horizon = {f["horizon_hours"]: f for f in result["forecasts"]}
@@ -246,6 +330,8 @@ def _render(result: dict) -> None:
                 "predicted_us_aqi": "predicted US AQI",
             },
         )
+
+    _render_explain_section(fc)
 
 
 def main() -> None:

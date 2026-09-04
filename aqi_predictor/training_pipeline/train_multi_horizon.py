@@ -24,7 +24,11 @@ import pandas as pd
 from aqi_predictor.config import MODELS_DIR
 from aqi_predictor.training_pipeline import registry
 from aqi_predictor.training_pipeline.dataset import split_dataset, target_name
-from aqi_predictor.training_pipeline.train import _format_table, train_all
+from aqi_predictor.training_pipeline.train import (
+    _format_table,
+    compute_shap_importance,
+    train_all,
+)
 
 HORIZONS = (24, 48, 72)
 COMPARISON_PATH = MODELS_DIR / "training_comparison_multi_horizon.json"
@@ -56,6 +60,9 @@ def train_and_register(horizon_hours: int) -> dict:
         f"R2={best['metrics']['test']['r2']:.4f})"
     )
 
+    X_test, _y_test = splits.xy("test")
+    shap_importance = compute_shap_importance(best["model"], X_test)
+
     version = registry.register_model(
         model_name,
         best["model"],
@@ -66,6 +73,7 @@ def train_and_register(horizon_hours: int) -> dict:
             "horizon_hours": horizon_hours,
         },
         feature_list=splits.feature_columns,
+        shap_importance=shap_importance,
     )
     print(f"registered {model_name} v{version}")
 
