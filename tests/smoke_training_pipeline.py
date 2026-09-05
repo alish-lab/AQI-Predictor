@@ -23,10 +23,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
 
 from aqi_predictor.training_pipeline import dataset, registry
+from aqi_predictor.training_pipeline.lstm_model import AQI_LSTM, build_sequences, train_lstm
 from aqi_predictor.training_pipeline.train import compute_shap_importance
 
 
@@ -312,6 +315,157 @@ def check_registry_roundtrip() -> None:
           "load_best picks lowest test RMSE (ties -> higher version)")
 
 
+def check_registry_extra_artifacts() -> None:
+    """``extra_artifacts`` (the LSTM's scaler + SHAP background) round-trip,
+    and models registered without them (the four tree/linear models) still get
+    back an empty dict rather than a missing key."""
+    project = _FakeProject(_FakeModelRegistry())
+    registry._project = lambda: project
+
+    X = np.arange(20).reshape(-1, 2).astype(float)
+    y = X.sum(axis=1)
+    plain = LinearRegression().fit(X, y)
+    v1 = registry.register_model(
+        "demo2", plain,
+        {"val": {"rmse": 1.0}, "test": {"rmse": 1.0}, "algorithm": "linreg"},
+        ["f0", "f1"],
+    )
+    _model1, meta1 = registry.load_model("demo2", v1)
+    assert meta1["extra_artifacts"] == {}, meta1["extra_artifacts"]
+
+    scaler = StandardScaler().fit(X)
+    background = np.zeros((3, 4, 2))
+    v2 = registry.register_model(
+        "demo2", LinearRegression().fit(X, y),
+        {"val": {"rmse": 0.5}, "test": {"rmse": 0.5}, "algorithm": "linreg"},
+        ["f0", "f1"],
+        extra_artifacts={"scaler.joblib": scaler, "shap_background.joblib": background},
+    )
+    _model2, meta2 = registry.load_model("demo2", v2)
+    assert set(meta2["extra_artifacts"]) == {"scaler.joblib", "shap_background.joblib"}
+    np.testing.assert_allclose(meta2["extra_artifacts"]["scaler.joblib"].mean_, scaler.mean_)
+    np.testing.assert_allclose(meta2["extra_artifacts"]["shap_background.joblib"], background)
+
+    # load_best_model also carries extra_artifacts through
+    _best_model, best_meta = registry.load_best_model("demo2")
+    assert best_meta["version"] == v2  # lower test RMSE
+    assert set(best_meta["extra_artifacts"]) == {"scaler.joblib", "shap_background.joblib"}
+
+    print("ok  registry: extra_artifacts round-trip (present -> dict of objects, "
+          "absent -> {})")
+
+
+def check_lstm_build_sequences() -> None:
+    seq_len = 4
+    idx = pd.date_range("2025-01-01", periods=10, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "location": "alpha",
+            "time": idx,
+            "f0": np.arange(10, dtype=float),
+            "tgt": np.arange(10, dtype=float) * 10,
+        }
+    )
+    X, y = build_sequences(df, ["f0"], "tgt", seq_len=seq_len)
+    n_expected = 10 - seq_len + 1
+    assert X.shape == (n_expected, seq_len, 1), X.shape
+    assert y.shape == (n_expected,)
+    for k, end in enumerate(range(seq_len - 1, 10)):
+        np.testing.assert_allclose(X[k, :, 0], np.arange(end - seq_len + 1, end + 1))
+        assert y[k] == end * 10  # window's target is the *last* row's value, no leakage
+
+    # a 1-hour gap inserted after row 4 must drop every window that spans it
+    gapped = df.copy()
+    gapped.loc[5:, "time"] = gapped.loc[5:, "time"] + pd.Timedelta(hours=1)
+    Xg, _yg = build_sequences(gapped, ["f0"], "tgt", seq_len=seq_len)
+    assert len(Xg) < n_expected, "windows spanning the gap should have been dropped"
+
+    # two locations' rows never share a window
+    two_loc = pd.concat(
+        [
+            df.assign(location="alpha"),
+            df.assign(location="beta", f0=df["f0"] + 100, tgt=df["tgt"] + 1000),
+        ],
+        ignore_index=True,
+    )
+    X2, _y2 = build_sequences(two_loc, ["f0"], "tgt", seq_len=seq_len)
+    assert len(X2) == 2 * n_expected
+    for window in X2[:, :, 0]:
+        assert (window < 100).all() or (window >= 100).all(), window
+
+    print(
+        "ok  lstm build_sequences: correct shape/target (no leakage), gaps "
+        "dropped, no cross-location windows"
+    )
+
+
+def check_lstm_training_and_registry() -> None:
+    """Trains a tiny ``AQI_LSTM`` end to end (few epochs, small synthetic
+    data): checks it registers via ``extra_artifacts``, evaluates cleanly, and
+    ``shap.GradientExplainer`` produces a global importance dict - all without
+    touching Hopsworks or a real, full-size dataset."""
+    import aqi_predictor.training_pipeline.lstm_model as lstm_model
+
+    raw = _synthetic(n_days=35, locations=("alpha",))
+    frame = build_training_frame(raw)
+    splits = split_dataset(frame)
+
+    saved = {
+        k: getattr(lstm_model, k)
+        for k in ("MAX_EPOCHS", "PATIENCE", "BATCH_SIZE", "BACKGROUND_SIZE")
+    }
+    lstm_model.MAX_EPOCHS = 5
+    lstm_model.PATIENCE = 3
+    lstm_model.BATCH_SIZE = 16
+    lstm_model.BACKGROUND_SIZE = 8
+    try:
+        result = train_lstm(splits)
+    finally:
+        for k, v in saved.items():
+            setattr(lstm_model, k, v)
+
+    model = result["model"]
+    assert isinstance(model, AQI_LSTM)
+    assert model.seq_len == lstm_model.SEQ_LEN
+
+    for split_name in ("val", "test"):
+        m = result["metrics"][split_name]
+        assert set(m) == {"rmse", "mae", "r2"}
+        assert all(np.isfinite(v) for v in m.values())
+
+    extra = result["extra_artifacts"]
+    assert set(extra) == {"scaler.joblib", "shap_background.joblib"}
+
+    shap_importance = compute_shap_importance(model, lstm_context=result["lstm_context"])
+    assert shap_importance is not None
+    assert set(shap_importance) == set(splits.feature_columns)
+    assert all(isinstance(v, float) and v >= 0 for v in shap_importance.values())
+
+    project = _FakeProject(_FakeModelRegistry())
+    registry._project = lambda: project
+    version = registry.register_model(
+        "demo_lstm",
+        model,
+        result["metrics"],
+        splits.feature_columns,
+        shap_importance=shap_importance,
+        extra_artifacts=extra,
+    )
+    loaded_model, meta = registry.load_model("demo_lstm", version)
+    assert isinstance(loaded_model, AQI_LSTM)
+    assert set(meta["extra_artifacts"]) == {"scaler.joblib", "shap_background.joblib"}
+    with torch.no_grad():
+        loaded_model.eval()
+        original_pred = model(torch.zeros(1, model.seq_len, model.n_features))
+        reloaded_pred = loaded_model(torch.zeros(1, model.seq_len, model.n_features))
+    np.testing.assert_allclose(original_pred.numpy(), reloaded_pred.numpy())
+
+    print(
+        "ok  lstm: trains end-to-end on synthetic data, registers via "
+        "extra_artifacts, GradientExplainer -> global {feature: mean|SHAP|} dict"
+    )
+
+
 def check_shap_importance() -> None:
     X = pd.DataFrame(
         np.arange(40).reshape(-1, 2).astype(float), columns=["f0", "f1"]
@@ -336,7 +490,10 @@ def main() -> int:
     check_split_non_default_horizon()
     check_split_no_overlap()
     check_registry_roundtrip()
+    check_registry_extra_artifacts()
     check_shap_importance()
+    check_lstm_build_sequences()
+    check_lstm_training_and_registry()
 
     print("\nall training-pipeline smoke checks passed")
     return 0

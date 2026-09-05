@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pandas as pd
 import shap
+import torch
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
@@ -22,6 +24,7 @@ from xgboost import XGBRegressor
 from aqi_predictor.config import MODELS_DIR
 from aqi_predictor.training_pipeline import registry
 from aqi_predictor.training_pipeline.dataset import Splits, split_dataset
+from aqi_predictor.training_pipeline.lstm_model import AQI_LSTM, train_lstm
 from aqi_predictor.training_pipeline.metrics import regression_metrics
 
 MODEL_NAME = "us_aqi_next"
@@ -59,18 +62,67 @@ def evaluate(model, X: pd.DataFrame, y: pd.Series) -> dict[str, float]:
     return regression_metrics(y, model.predict(X))
 
 
-def compute_shap_importance(model, X_test: pd.DataFrame) -> dict[str, float] | None:
-    """Mean |SHAP value| per feature for tree-based ``model``, else ``None``.
+def _compute_lstm_shap_importance(lstm_context: dict) -> dict[str, float]:
+    """Global mean |SHAP| per feature for the LSTM via ``shap.GradientExplainer``.
+
+    ``shap.DeepExplainer`` was tried first (per the original plan) but its
+    PyTorch backend has no attribution rule registered for ``nn.LSTM``
+    ("unrecognized nn.Module: LSTM"), and the resulting attributions failed
+    shap's own additivity check by ~40x the tolerance - not a rounding error,
+    a genuinely unsupported op. ``GradientExplainer`` computes expected
+    gradients via plain autograd with no per-layer op registry, so it works on
+    any differentiable architecture including LSTMs, with no additivity
+    check to fail. Still an approximation (as ``DeepExplainer`` would have
+    been), just one that doesn't require an unsupported op.
+
+    Returns SHAP values shaped ``(n_samples, seq_len, n_features)`` (one
+    attribution per input timestep). Summing absolute values across the time
+    axis first, then averaging over samples, collapses that to the same
+    non-negative ``{feature: mean_abs_shap}`` shape ``compute_shap_importance``
+    already returns for the tree models - no dashboard change needed.
+    """
+    model = lstm_context["model"]
+    background = torch.tensor(lstm_context["background_scaled"], dtype=torch.float32)
+    test_sequences = torch.tensor(
+        lstm_context["test_sequences_scaled"], dtype=torch.float32
+    )
+
+    model.eval()
+    explainer = shap.GradientExplainer(model, background)
+    shap_values = explainer.shap_values(test_sequences)
+    if isinstance(shap_values, list):  # some shap versions wrap single-output in a list
+        shap_values = shap_values[0]
+    shap_values = np.asarray(shap_values)
+    if shap_values.ndim == 4:  # trailing output-dim some shap versions add
+        shap_values = shap_values[..., 0]
+
+    per_sample_importance = np.abs(shap_values).sum(axis=1)  # (n_samples, n_features)
+    mean_abs = per_sample_importance.mean(axis=0)  # (n_features,)
+    return {
+        col: float(val)
+        for col, val in zip(lstm_context["feature_columns"], mean_abs)
+    }
+
+
+def compute_shap_importance(
+    model, X_test: pd.DataFrame | None = None, lstm_context: dict | None = None
+) -> dict[str, float] | None:
+    """Mean |SHAP value| per feature for tree-based/LSTM ``model``, else ``None``.
 
     Ridge is fit inside a ``Pipeline`` so it never matches either isinstance
-    check here. XGBRegressor/RandomForestRegressor are the only estimators
-    :func:`shap.TreeExplainer` is used for - no background sample needed.
+    check here. XGBRegressor/RandomForestRegressor use ``shap.TreeExplainer``
+    (no background sample needed) over the flat ``X_test`` rows; ``AQI_LSTM``
+    uses ``shap.GradientExplainer`` over ``lstm_context``'s scaled test
+    sequences and background sample (see
+    :func:`_compute_lstm_shap_importance` for why not ``DeepExplainer``).
     """
-    if not isinstance(model, (RandomForestRegressor, XGBRegressor)):
-        return None
-    shap_values = shap.TreeExplainer(model).shap_values(X_test)
-    mean_abs = pd.DataFrame(shap_values, columns=X_test.columns).abs().mean()
-    return {col: float(val) for col, val in mean_abs.items()}
+    if isinstance(model, (RandomForestRegressor, XGBRegressor)):
+        shap_values = shap.TreeExplainer(model).shap_values(X_test)
+        mean_abs = pd.DataFrame(shap_values, columns=X_test.columns).abs().mean()
+        return {col: float(val) for col, val in mean_abs.items()}
+    if isinstance(model, AQI_LSTM):
+        return _compute_lstm_shap_importance({**lstm_context, "model": model})
+    return None
 
 
 def train_all(splits: Splits) -> dict[str, dict]:
@@ -89,6 +141,9 @@ def train_all(splits: Splits) -> dict[str, dict]:
                 "test": evaluate(model, X_test, y_test),
             },
         }
+
+    print(f"[train] fitting lstm on {len(X_train)} rows ...", flush=True)
+    results["lstm"] = train_lstm(splits)
     return results
 
 
@@ -125,7 +180,9 @@ def main() -> int:
           f"(RMSE={best['metrics']['test']['rmse']:.3f})")
 
     X_test, _y_test = splits.xy("test")
-    shap_importance = compute_shap_importance(best["model"], X_test)
+    shap_importance = compute_shap_importance(
+        best["model"], X_test, lstm_context=best.get("lstm_context")
+    )
 
     version = registry.register_model(
         MODEL_NAME,
@@ -133,6 +190,7 @@ def main() -> int:
         metrics={**best["metrics"], "algorithm": best_name, "selected_by": "test_rmse"},
         feature_list=splits.feature_columns,
         shap_importance=shap_importance,
+        extra_artifacts=best.get("extra_artifacts"),
     )
     print(f"registered {MODEL_NAME} v{version} in the Hopsworks model registry")
 

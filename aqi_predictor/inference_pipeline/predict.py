@@ -19,14 +19,17 @@ import argparse
 import datetime as dt
 import json
 
+import numpy as np
 import pandas as pd
 import shap
+import torch
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 
 from aqi_predictor.feature_pipeline import fetch
 from aqi_predictor.feature_pipeline.features import build_features
 from aqi_predictor.training_pipeline import registry
+from aqi_predictor.training_pipeline.lstm_model import AQI_LSTM
 
 _TREE_MODEL_TYPES = (RandomForestRegressor, XGBRegressor)
 _TOP_N_FEATURES = 5
@@ -121,6 +124,107 @@ def build_input_row(
     return row.astype("float64")
 
 
+def build_input_sequence(
+    window: pd.DataFrame,
+    feature_list: list[str],
+    forecast_weather: pd.DataFrame,
+    horizon_hours: int,
+) -> pd.DataFrame:
+    """Sequence counterpart to :func:`build_input_row`: one row per hour in
+    ``window`` (the trailing ``seq_len`` observed hours, chronological order
+    preserved), each with **exactly** ``feature_list`` columns.
+
+    Each row's own ``<var>_target`` uses the forecast value at *that row's*
+    ``time + horizon_hours`` - not ``target_time``, which is only the last
+    window row's target time. Earlier rows in the window need weather further
+    in the past relative to "now" (or, for large horizons, still in the
+    future); ``forecast_weather`` must cover the full span, which it does here
+    because ``forecast_ahead`` is called with ``past_days=2`` (see
+    :mod:`aqi_predictor.feature_pipeline.fetch`).
+    """
+    fc = forecast_weather.set_index("time")
+    out_rows: list[list[float]] = []
+
+    for _, row in window.iterrows():
+        row_target_time = pd.Timestamp(row["time"]) + pd.Timedelta(hours=horizon_hours)
+        values: dict[str, object] = {}
+        missing: list[str] = []
+        for col in feature_list:
+            if col.endswith(_TARGET_SUFFIX):
+                base = col[: -len(_TARGET_SUFFIX)]
+                if base in fc.columns and row_target_time in fc.index:
+                    values[col] = fc.at[row_target_time, base]
+                else:
+                    missing.append(col)
+            elif col in row.index:
+                values[col] = row[col]
+            else:
+                missing.append(col)
+
+        if missing:
+            raise RuntimeError(
+                f"cannot build LSTM sequence input at {row['time']} "
+                f"(target {row_target_time}): {len(missing)} feature(s) not "
+                f"available from the observed row or the weather forecast: {missing}"
+            )
+        out_rows.append([values[c] for c in feature_list])
+
+    return pd.DataFrame(out_rows, columns=list(feature_list)).astype("float64")
+
+
+def _lstm_local_shap(
+    model: AQI_LSTM,
+    x_scaled: torch.Tensor,
+    background_scaled: np.ndarray | None,
+    feature_columns: list[str],
+    raw_last_row: pd.Series,
+) -> list[dict] | None:
+    """Top ``_TOP_N_FEATURES`` features by |SHAP value| for one LSTM input sequence.
+
+    Uses ``shap.GradientExplainer``, not ``shap.DeepExplainer``: the latter has
+    no attribution rule for ``nn.LSTM`` and its output failed shap's own
+    additivity check by ~40x tolerance when tried against the real trained
+    model (see ``train.py._compute_lstm_shap_importance``).
+    ``GradientExplainer`` computes expected gradients via plain autograd, which
+    works on any differentiable architecture.
+
+    Returns values shaped ``(1, seq_len, n_features)`` for a single input;
+    summing (signed, not absolute) across the time axis collapses that to one
+    value per feature while preserving the direction the tree-model path
+    already carries (positive = pushes AQI up), so the dashboard's existing
+    up/down coloring stays meaningful. ``value`` is the feature's raw value at
+    the most recent (last) hour in the window, the closest LSTM analogue to
+    the tree path's single-row input value.
+    """
+    if background_scaled is None:
+        return None
+
+    model.eval()
+    background = torch.tensor(background_scaled, dtype=torch.float32)
+    explainer = shap.GradientExplainer(model, background)
+    shap_values = explainer.shap_values(x_scaled)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+    shap_values = np.asarray(shap_values)
+    if shap_values.ndim == 4:
+        shap_values = shap_values[..., 0]
+
+    per_feature = shap_values[0].sum(axis=0)  # signed sum across seq_len -> (n_features,)
+    ranked = sorted(
+        zip(feature_columns, per_feature),
+        key=lambda t: abs(t[1]),
+        reverse=True,
+    )[:_TOP_N_FEATURES]
+    return [
+        {
+            "feature": feat,
+            "shap_value": float(sv),
+            "value": float(raw_last_row[feat]) if feat in raw_last_row.index else float("nan"),
+        }
+        for feat, sv in ranked
+    ]
+
+
 def _local_shap_top_features(model, x: pd.DataFrame) -> list[dict] | None:
     """Top ``_TOP_N_FEATURES`` features by |SHAP value| for one input row.
 
@@ -151,8 +255,35 @@ def forecast(location_name: str) -> dict:
     for horizon in HORIZONS:
         model, meta = registry.load_best_model(model_name(horizon))
         target_time = now_time + pd.Timedelta(hours=horizon)
-        x = build_input_row(now_row, meta["feature_list"], weather, target_time)
-        predicted = float(model.predict(x)[0])
+
+        if isinstance(model, AQI_LSTM):
+            seq_len = model.seq_len
+            if len(observed) < seq_len:
+                raise RuntimeError(
+                    f"only {len(observed)} observed hour(s) available for "
+                    f"{location_name!r}, need >= {seq_len} for {meta['name']} "
+                    f"v{meta['version']} (an LSTM)"
+                )
+            window = observed.iloc[-seq_len:].reset_index(drop=True)
+            x_seq = build_input_sequence(window, meta["feature_list"], weather, horizon)
+            scaler = meta["extra_artifacts"]["scaler.joblib"]
+            x_scaled = scaler.transform(x_seq.to_numpy()).reshape(1, seq_len, -1)
+            x_tensor = torch.tensor(x_scaled, dtype=torch.float32)
+            model.eval()
+            with torch.no_grad():
+                predicted = float(model(x_tensor).squeeze().item())
+            top_features = _lstm_local_shap(
+                model,
+                x_tensor,
+                meta["extra_artifacts"].get("shap_background.joblib"),
+                meta["feature_list"],
+                x_seq.iloc[-1],
+            )
+        else:
+            x = build_input_row(now_row, meta["feature_list"], weather, target_time)
+            predicted = float(model.predict(x)[0])
+            top_features = _local_shap_top_features(model, x)
+
         forecasts.append(
             {
                 "horizon_hours": horizon,
@@ -160,7 +291,7 @@ def forecast(location_name: str) -> dict:
                 "predicted_us_aqi": round(predicted, 1),
                 "model_name": meta["name"],
                 "model_version": meta["version"],
-                "top_features": _local_shap_top_features(model, x),
+                "top_features": top_features,
                 "shap_importance": meta.get("shap_importance"),
             }
         )

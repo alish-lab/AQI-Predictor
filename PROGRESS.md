@@ -186,9 +186,6 @@ fetching, LSTM.
   installed) for the trained models.
 - **Hazardous-AQI alerting** – threshold detection + notification when predicted
   or observed `us_aqi` crosses unhealthy levels.
-- **LSTM model** – `training_pipeline/lstm_model.py` is left from the old code and
-  is currently unbuildable (it imports the deleted `process.py`). A sequence model
-  is deferred; it gets rebuilt against `dataset.py` in a later phase.
 
 ## Phase 3 – Live inference pipeline — done
 
@@ -396,3 +393,198 @@ Out of scope: GitHub Actions/CI, Streamlit Cloud deploy, hazardous-AQI alerting,
 LSTM.
 
 ## Phase 5 – Automation (GitHub Actions) — not started
+
+(Superseded by later commits – see `.github/workflows/feature_pipeline.yml` /
+`training_pipeline.yml`, which run hourly / daily via `workflow_dispatch` +
+`schedule`. This section was never updated after that work landed; not part of
+Phase 6, left as-is.)
+
+## Phase 6 – LSTM deep learning model — done
+
+**What changed.** `training_pipeline/lstm_model.py` (previously stale –
+imported a deleted `process.py`, used `KernelExplainer`, was a top-level script
+that ran training on import rather than an importable module) was rewritten
+from scratch:
+
+- `AQI_LSTM(nn.Module)` – 1-2 layer LSTM (default: 1 layer, hidden size 64,
+  dropout 0.2) + a linear head. `seq_len` is stored as a plain attribute so it
+  survives `joblib` pickling and tells `predict.py` how much history to fetch.
+  Forward returns `(batch, 1)`, not squeezed to `(batch,)` – `shap`'s PyTorch
+  wrapper indexes `outputs.shape[1]` and errors on a 1-D output.
+- `build_sequences(df, feature_columns, target, seq_len=48)` – slides a
+  48-hour window per location over **one split at a time** (train/val/test),
+  so windows never cross a split boundary; a window is dropped if any pair of
+  its 48 hours is not exactly 1h apart (an unfilled gap), so a gap never
+  silently splices non-adjacent hours together.
+- `train_lstm(splits)` – fits a **train-only** `StandardScaler` (the tree
+  models need no scaling; this one does), trains with Adam + early stopping on
+  validation RMSE (patience 8, max 100 epochs), and returns the model, metrics,
+  a `{"scaler.joblib": ..., "shap_background.joblib": ...}` dict for the
+  registry, and an `lstm_context` dict (scaled test sequences + SHAP
+  background) so `train.py` doesn't have to re-derive them for the global SHAP
+  computation.
+
+**Sequence vs. tabular reasoning.** The tree/linear models see one engineered
+feature row per prediction; the LSTM sees the trailing 48-hour trajectory of
+the *same* engineered columns (not raw un-engineered inputs – lags, rolling
+stats, the `<var>_target` future-weather features, etc. are all reused as-is).
+Same per-horizon `us_aqi` target, same train/val/test split boundaries, no
+shuffling. It registers under the same four model names
+(`us_aqi_next`/`us_aqi_h24`/`h48`/`h72`) and competes for real via
+`registry.load_best_model`'s existing lowest-test-RMSE tie-break – there is no
+special-casing to make it win or lose.
+
+**Registry (`registry.py`) – generalized for extra artifacts.**
+`register_model(..., extra_artifacts: dict[str, Any] | None = None)` joblib-
+dumps each `{filename: object}` pair alongside `model.joblib`; `metadata.json`
+records only the filenames (`extra_artifact_files`). `load_model`/
+`load_best_model` keep their existing 2-tuple return shape – no signature
+change – but load every named extra artifact back and attach them as
+`metadata["extra_artifacts"] = {filename: object}`. Models registered without
+`extra_artifacts` (the four tree/linear models, plus every version registered
+before this existed) get back `{}`, confirmed against real already-registered
+versions in Hopsworks (`us_aqi_next` v1-v4 have no `extra_artifact_files` key
+at all – `.get(...) or []` handles the missing key cleanly).
+
+**Inference (`predict.py`) – isinstance dispatch.** `forecast()` now branches
+on `isinstance(model, AQI_LSTM)`: the sequence path pulls the trailing
+`model.seq_len` hours from `observed`, builds per-row `<var>_target` values via
+a new `build_input_sequence()` (each window row's own `time + horizon`, not
+just the last row's – `forecast_ahead`'s `past_days=2` window comfortably
+covers the full span needed at every horizon), scales with the stored scaler,
+and runs the model in eval mode under `torch.no_grad()`. The existing
+single-row tree-model path (`build_input_row`, `_local_shap_top_features`) is
+untouched.
+
+**SHAP: DeepExplainer → GradientExplainer (a deviation from the original
+plan, found in-session).** `shap.DeepExplainer` was tried first as specified.
+It has no attribution rule registered for `nn.LSTM`
+(`UserWarning: unrecognized nn.Module: LSTM`), and the resulting attributions
+failed shap's own additivity check by ~40x tolerance (`Max. diff:
+0.399 - Tolerance: 0.01`) against the real trained model – not a rounding
+error, a genuinely unsupported op. Switched to `shap.GradientExplainer`
+(same package, still gradient-based/fast, no per-layer op registry so it works
+on any differentiable architecture) after checking with the user rather than
+silently suppressing the additivity check or dropping SHAP for the LSTM.
+Global importance (`train.py`) sums `|SHAP|` across the time axis then
+averages over samples, matching the tree path's existing non-negative
+`{feature: mean_abs_shap}` contract. Local importance (`predict.py`) sums the
+*signed* SHAP values across the time axis instead – preserving the direction
+the tree path already carries (positive = pushes AQI up) so the dashboard's
+existing up/down coloring on the local SHAP chart stays meaningful; this is a
+deliberate deviation from a literal "always take the absolute value" reading,
+made to keep both existing dashboard contracts (signed local / non-negative
+global) intact without any dashboard code change.
+
+**Real training results (Karachi, full Hopsworks feature store, test split;
+2026-09-06).** LSTM competed honestly against Ridge/RandomForest/XGBoost –
+no thumb on the scale either way:
+
+| horizon | ridge  | random_forest | xgboost | **lstm**  | winner (test RMSE) |
+|---------|--------|----------------|---------|-----------|---------------------|
+| +1h     | 0.624  | 0.285          | 0.283   | 0.590     | xgboost (v5) – but a pre-existing random_forest v4 (RMSE 0.1545, from before this phase) still beats all of v5 and is what `load_best_model` actually serves |
+| +24h    | 5.778  | 5.326          | 4.887   | **4.810** | **lstm** |
+| +48h    | 10.109 | 8.353          | 8.014   | **7.343** | **lstm** |
+| +72h    | 12.288 | 11.645         | 11.012  | **9.944** | **lstm** |
+
+The LSTM lost at +1h (where persistence dominates and the tree models were
+already near-perfect) and won at every multi-step horizon, where the 48h
+trajectory gives it signal the single-row tree models don't have. Both
+outcomes are reported as-is.
+
+**Registered in Hopsworks (definition-of-done runs).**
+`python -m aqi_predictor.training_pipeline.train` → `us_aqi_next` v5
+(xgboost; served version is still v4, random_forest, per the RMSE table
+above). `python -m aqi_predictor.training_pipeline.train_multi_horizon` →
+`us_aqi_h24` v5, `us_aqi_h48` v5, `us_aqi_h72` v4 (lstm, all three) – each
+upload included `scaler.joblib` + `shap_background.joblib` via
+`extra_artifacts`; Hopsworks' model registry accepted the extra-artifact
+upload approach with no issue (the "stop and tell me if the registry rejects
+this" condition did not trigger).
+`python -m aqi_predictor.inference_pipeline.predict --location karachi`
+produced a forecast at all four horizons against this real mixed fleet
+(random_forest serving +1h, lstm serving +24h/+48h/+72h) with no crash.
+
+**Tests.** `tests/smoke_training_pipeline.py` – `build_sequences` shape/no-
+leakage/gap-handling/no-cross-location-window checks, an end-to-end tiny
+(5-epoch) `train_lstm` run on synthetic data through
+`shap.GradientExplainer` and the registry's `extra_artifacts` round-trip.
+`tests/smoke_inference_pipeline.py` – `build_input_sequence`'s per-row
+target-time lookup and its missing-feature error, `_lstm_local_shap`'s ranked
+output shape and `None`-on-no-background behavior. `tests/smoke_dashboard.py`
+– the "Explain this forecast" section renders for a forecast whose
+`top_features`/`shap_importance` are shaped like the LSTM's output, confirming
+no dashboard code assumed a tree-model-only shape (none needed changing).
+All four `tests/smoke_*.py` pass, no network, no full-size training.
+`python -m pytest tests/ -v` collects 0 items and "passes" trivially – this
+project's tests are plain scripts (`python tests/smoke_*.py`), not
+pytest-style (`test_*` files/functions), and pytest itself isn't in
+`requirements.txt`; the real verification is the four smoke-test runs above.
+
+Out of scope for this phase (untouched, as instructed): how the tree/linear
+models are trained, registered, or served; registry's other public function
+signatures; hazardous-AQI alerting.
+
+## Phase 7 – Statistical baselines — done
+
+**What changed.** `scripts/evaluate_baselines.py` computes two classical
+baselines and combines them with the already-registered ML models' test
+metrics into one comparison table, saved to `reports/model_comparison.csv`.
+Neither baseline calls `registry.register_model` and neither is ever eligible
+to be served – they exist purely for this table. `load_best_model`'s
+selection logic is untouched; the script only *calls* it (to read metrics),
+never modifies it.
+
+- **seasonal-naive** – prediction for any target time = the actual observed
+  `us_aqi` exactly 24h before that target time, regardless of horizon (so for
+  +24h this is literally "today's value predicts tomorrow's"; for +1h/+48h/
+  +72h it's the same fixed daily-period rule applied uniformly, per spec).
+- **SARIMA** – `statsmodels` `SARIMAX`, one fit per location on that
+  location's pre-test history only (no test leakage), univariate on `us_aqi`,
+  fixed order `(1,1,1)x(1,1,1,24)` (not grid-searched – a comparison
+  baseline). Added `statsmodels==0.15.0` to `requirements.txt` (pmdarima was
+  explicitly not added, per the brief).
+- Both baselines are evaluated against the *same* `dataset.split_dataset`
+  test-split boundary the ML models used – the script fetches the feature
+  store once and passes it into `build_training_frame(df=..., horizon_hours=h)`
+  per horizon, replicating exactly what `train.py`/`train_multi_horizon.py`
+  did rather than approximating it.
+- The ML rows are pulled from `registry.load_best_model(name)` per horizon
+  (whatever is actually being served right now), not retrained, labeled
+  `location="all"` since those models are trained pooled across every
+  location in the feature store, not fit per location like the baselines.
+
+**Real results (Karachi, full Hopsworks feature store, test split;
+2026-09-06)** – see `reports/model_comparison.csv` for the full table:
+
+| horizon | seasonal_naive | sarima | **served ML** |
+|---------|----------------|--------|----------------|
+| +1h     | RMSE 7.245     | RMSE 27.197 | RMSE 0.155 (random_forest) |
+| +24h    | RMSE 7.261     | RMSE 26.883 | RMSE 4.810 (lstm) |
+| +48h    | RMSE 7.368     | RMSE 26.883 | RMSE 7.343 (lstm) |
+| +72h    | RMSE 7.369     | RMSE 26.668 | RMSE 9.944 (lstm) |
+
+The registered ML models beat both baselines at every horizon. **SARIMA
+underperforms even the naive baseline, badly** (R2 around -4.2 to -4.6, i.e.
+worse than predicting the mean) – checked this wasn't an indexing/timezone
+bug before accepting it: a manual trace showed the fitted model tracks the
+actual series closely for the first ~60 forecast steps, then collapses to a
+near-flat ~71 for the remaining ~350 of the 409 static forecast steps
+required, losing the daily oscillation (actual data swings 60-92) entirely.
+That is a real property of a fixed, non-grid-searched `(1,1,1)x(1,1,1,24)`
+order asked to produce one static ~17-day-ahead forecast with no
+re-fitting – not a bug in the evaluation code. Reported as-is, per the same
+"legitimate result, not a failure to hide" principle Phase 6 used for the
+LSTM.
+
+**Tests.** `tests/smoke_evaluate_baselines.py` – seasonal-naive lookup
+correctness (any horizon, any missing-lookup case returns NaN rather than
+crashing), `_metric_row` excluding NaN predictions from RMSE/MAE/R2, and a
+SARIMA fit + forecast on a 200-hour *synthetic* series (no network, runs in
+under a second) checking the forecast is finite and correctly time-indexed
+past training data. All five `tests/smoke_*.py` files pass, no network calls
+added to the test suite.
+
+Out of scope for this phase (as instructed): calling `register_model` for
+either baseline; changing `load_best_model`'s selection logic; tuning SARIMA
+beyond the fixed order.

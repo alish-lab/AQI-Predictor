@@ -61,7 +61,9 @@ def train_and_register(horizon_hours: int) -> dict:
     )
 
     X_test, _y_test = splits.xy("test")
-    shap_importance = compute_shap_importance(best["model"], X_test)
+    shap_importance = compute_shap_importance(
+        best["model"], X_test, lstm_context=best.get("lstm_context")
+    )
 
     version = registry.register_model(
         model_name,
@@ -74,6 +76,7 @@ def train_and_register(horizon_hours: int) -> dict:
         },
         feature_list=splits.feature_columns,
         shap_importance=shap_importance,
+        extra_artifacts=best.get("extra_artifacts"),
     )
     print(f"registered {model_name} v{version}")
 

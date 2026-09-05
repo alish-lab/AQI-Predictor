@@ -127,6 +127,51 @@ def check_forecast_dict_shape() -> None:
     print("ok  forecast dict: recent / forecasts well-formed, timestamps parse")
 
 
+def _synthetic_forecast_with_shap() -> dict:
+    """Like :func:`_synthetic_forecast`, but every horizon carries
+    ``top_features`` / ``shap_importance`` shaped exactly like the LSTM path's
+    (signed local values summed across time, non-negative global mean|SHAP|) -
+    the dashboard's rendering code doesn't know or care which model
+    architecture produced them, so this is what "covering the LSTM path"
+    means for the dashboard layer.
+    """
+    result = _synthetic_forecast()
+    feature_names = ["pm2_5_lag_1h", "temperature_2m_target", "us_aqi_roll_mean_24h"]
+    for fc in result["forecasts"]:
+        fc["top_features"] = [
+            {"feature": name, "shap_value": (-1) ** j * (3.0 - j), "value": 10.0 + j}
+            for j, name in enumerate(feature_names)
+        ]
+        fc["shap_importance"] = {name: 1.0 + j for j, name in enumerate(feature_names)}
+    return result
+
+
+def check_app_renders_with_shap() -> None:
+    """The 'Explain this forecast' section renders for a forecast whose
+    ``top_features`` / ``shap_importance`` came from the LSTM path - no
+    dashboard code change was needed, this just verifies nothing in the
+    rendering code silently assumed a tree-model-only shape."""
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    from aqi_predictor.inference_pipeline import predict
+
+    result = _synthetic_forecast_with_shap()
+
+    st.cache_data.clear()
+    with patch.object(predict, "forecast", return_value=result):
+        at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
+
+    assert not at.exception, at.exception
+    subheaders = " ".join(m.value for m in at.subheader)
+    assert "Explain this forecast" in subheaders
+
+    print(
+        "ok  app: explain section renders for LSTM-shaped SHAP fields "
+        "(signed local top_features, non-negative global shap_importance)"
+    )
+
+
 def check_app_renders() -> None:
     import streamlit as st
     from streamlit.testing.v1 import AppTest
@@ -171,6 +216,7 @@ def main() -> int:
     check_aqi_category_boundaries()
     check_forecast_dict_shape()
     check_app_renders()
+    check_app_renders_with_shap()
     print("\nall dashboard smoke checks passed")
     return 0
 

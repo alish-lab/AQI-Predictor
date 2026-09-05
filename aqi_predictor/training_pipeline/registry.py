@@ -15,6 +15,13 @@ holds:
 * ``metadata.json``  - the full record ``{name, version, created_at,
   model_class, metrics, feature_list}``, with ``metrics`` kept in the original
   nested shape (``{"val": {...}, "test": {...}, "algorithm": ...}``).
+* any files named in ``metadata["extra_artifact_files"]`` - additional
+  ``joblib``-dumped objects (e.g. a fitted ``StandardScaler`` an LSTM needs at
+  inference time) passed via ``register_model(..., extra_artifacts=...)``.
+  ``load_model`` / ``load_best_model`` load these back and attach them to the
+  returned metadata dict as ``metadata["extra_artifacts"] = {filename: obj}``.
+  Models registered without ``extra_artifacts`` (the four tree/linear models)
+  get back an empty dict, unchanged from before this existed.
 
 The Hopsworks model's own ``metrics`` field is a *flat numeric* subset
 (``test_rmse``/``val_rmse``/...) used only for the registry UI and for picking
@@ -100,11 +107,18 @@ def _download(hops_model) -> tuple[Any, dict]:
 
     ``metadata.json`` was uploaded before Hopsworks assigned a version, so the
     real name/version from the registry object are overlaid on read.
+    ``metadata["extra_artifacts"]`` is populated by loading every file named in
+    ``metadata["extra_artifact_files"]`` (empty/missing for models registered
+    without ``extra_artifacts``, i.e. all four tree/linear models).
     """
     directory = Path(hops_model.download())
     model, metadata = _load_artifact_dir(directory)
     metadata["name"] = hops_model.name
     metadata["version"] = int(hops_model.version)
+    extra_files = metadata.get("extra_artifact_files") or []
+    metadata["extra_artifacts"] = {
+        fname: joblib.load(directory / fname) for fname in extra_files
+    }
     return model, metadata
 
 
@@ -117,13 +131,20 @@ def register_model(
     metrics: dict,
     feature_list: list[str],
     shap_importance: dict[str, float] | None = None,
+    extra_artifacts: dict[str, Any] | None = None,
 ) -> int:
     """Persist ``model`` as the next version of ``name``; return the version int.
 
     ``shap_importance`` is an optional ``{feature: mean_abs_shap_value}`` dict
-    (tree-based models only) stored in ``metadata.json`` for the dashboard's
-    global feature-importance chart. ``None`` for models without a SHAP
-    explainer (e.g. Ridge).
+    (tree-based models and the LSTM) stored in ``metadata.json`` for the
+    dashboard's global feature-importance chart. ``None`` for models without a
+    SHAP explainer (e.g. Ridge).
+
+    ``extra_artifacts`` is an optional ``{filename: object}`` dict of
+    additional objects to ``joblib.dump`` alongside ``model.joblib`` (e.g. the
+    LSTM's ``{"scaler.joblib": scaler, "shap_background.joblib": background}``).
+    Omitted (``None``) for the four tree/linear models - no behavior change for
+    them.
     """
     mr = _model_registry()
 
@@ -137,11 +158,14 @@ def register_model(
         "metrics": metrics,
         "feature_list": list(feature_list),
         "shap_importance": shap_importance,
+        "extra_artifact_files": sorted(extra_artifacts) if extra_artifacts else [],
     }
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         joblib.dump(model, tmp_path / _MODEL_FILE)
+        for filename, obj in (extra_artifacts or {}).items():
+            joblib.dump(obj, tmp_path / filename)
         (tmp_path / _META_FILE).write_text(
             json.dumps(metadata, indent=2), encoding="utf-8"
         )
