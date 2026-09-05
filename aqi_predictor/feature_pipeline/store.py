@@ -111,7 +111,9 @@ def get_feature_view(
     """
     lo, hi = _to_utc_ts(start), _to_utc_ts(end)
 
-    raw = _feature_group().read(dataframe_type="pandas")
+    raw = _feature_group().read(
+        dataframe_type="pandas", read_options={"use_hive": True}
+    )
     if raw is None or len(raw) == 0:
         return pd.DataFrame()
 
