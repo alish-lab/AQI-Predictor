@@ -392,12 +392,130 @@ materialization job SUCCEEDS, and the read-back count matches the local parquet.
 Out of scope: GitHub Actions/CI, Streamlit Cloud deploy, hazardous-AQI alerting,
 LSTM.
 
-## Phase 5 – Automation (GitHub Actions) — not started
+## Phase 5 – Dashboard redesign, SHAP explainability & GitHub Actions automation — done
 
-(Superseded by later commits – see `.github/workflows/feature_pipeline.yml` /
-`training_pipeline.yml`, which run hourly / daily via `workflow_dispatch` +
-`schedule`. This section was never updated after that work landed; not part of
-Phase 6, left as-is.)
+*(This section replaces the earlier "not started" stub, which was never updated
+after the work below actually landed across commits `70065e6`, `6052e42`,
+`bf9a533`, `2536ac1`, `7ffaaef`.)*
+
+### Dashboard redesign (`70065e6`)
+
+`aqi_predictor/dashboard/app.py` moved from a plain title + two line charts to
+a layout closer to real public AQI apps:
+
+- four `st.columns(4)` stat cards (Now / +24h / +48h / +72h), custom CSS
+  (`_CARD_CSS`), each showing the AQI number and a category pill coloured from
+  `aqi_scale.aqi_category()`, with `_text_on()` picking readable text colour
+  against each pill's background by luminance.
+- `_trend_chart()` — an Altair *layered* chart: `mark_rect` EPA category bands
+  behind a `mark_line` of observed AQI. Both layers need explicit `x`/`x2`
+  spans across the observed window; the "omit x for a full-width band" idiom
+  does not reliably render in Vega-Lite.
+- `_forecast_chart()` — a *bar* chart, not a connected line: four discrete
+  horizon predictions aren't a continuous series, and drawing them as one
+  would visually imply interpolation that isn't real. Bars coloured per-point
+  by category, values labelled via `mark_text`.
+- raw forecast table moved into a collapsed `st.expander("Forecast details")`.
+
+Two real bugs only surfaced by actually running the app, not from reading the
+code: Hopsworks/hsfs's `tqdm` progress bars were stalling Streamlit's render
+entirely (`os.environ.setdefault("TQDM_DISABLE", "1")` fixes it), and Vega-Lite
+was silently dropping every row when fed tz-aware ISO timestamps (fixed by
+stripping tz before charting, same pattern `store.py` already used).
+
+### SHAP explainability (`6052e42`)
+
+Split by design into two separate computation points, not one:
+
+- **Global** (training time) — `train.compute_shap_importance(model, X_test)`
+  runs `shap.TreeExplainer(model).shap_values(X_test)` and returns mean
+  `|SHAP|` per feature, only for `RandomForestRegressor`/`XGBRegressor`
+  (`isinstance` check); `None` for anything else (Ridge is wrapped in a
+  `Pipeline` and structurally can't match). Stored in the registered model's
+  `metadata.json` as `shap_importance` — additive, doesn't change
+  `register_model`'s existing callers.
+- **Local** (inference time) — `predict._local_shap_top_features(model, x)`
+  runs the same `TreeExplainer` on the *exact* single input row `x` that was
+  actually fed to `model.predict()` for that forecast, ranked by `|SHAP|`, top
+  5 kept. This is per-prediction, not per-model.
+- Dashboard: a new "Explain this forecast" section — horizon selector, a local
+  SHAP bar chart coloured by push direction (positive = pushes AQI up), and a
+  global mean-`|SHAP|` bar chart, both degrading to a plain caption when the
+  served model has no SHAP data (Ridge).
+- `shap.TreeExplainer` was the deliberate choice over `KernelExplainer` (the
+  slow, no-background-needed alternative used by the earlier, now-deleted LSTM
+  code): tree explainers need no background sample and are exact, not
+  approximate, for tree models.
+- `requirements.txt`: `+ shap==0.52.0`.
+
+### Registry tie-break fix (surfaced by Claude Code's own multi-option prompts, decided live)
+
+Two real, separate bugs in `load_best_model`'s "lowest test RMSE wins" rule:
+
+1. An **exact tie** between the old pre-SHAP v1 and new v2 for `us_aqi_next`
+   and `us_aqi_h72` (deterministic retraining on unchanged data) meant the
+   dashboard non-deterministically served v1 depending on Hopsworks' API
+   return order. Fixed by a deliberately general rule, not a SHAP-specific
+   hack: **prefer the higher version number on any RMSE tie.**
+2. A **near-tie** (~1.7e-16 apart — RandomForest's `n_jobs=-1` parallel-
+   reduction floating-point noise) that the exact-equality fix above didn't
+   catch. Fixed by rounding test RMSE to `_RMSE_COMPARISON_PRECISION = 6`
+   decimal places before comparing, in both the fast path (Hopsworks' flat
+   `training_metrics`) and the fallback path (downloaded `metadata.json`), sort
+   key `(round(rmse, 6), -version)`. Verified against the exact real numbers
+   hit in production: `0.15454074049236596` vs `0.15454074049236613`.
+
+### GitHub Actions automation (`70065e6`, workflow files)
+
+- `.github/workflows/feature_pipeline.yml` — hourly (`cron: "17 * * * *"`, off
+  the top-of-hour rush) + `workflow_dispatch`, `concurrency: {group:
+  feature-pipeline, cancel-in-progress: false}` so overlapping runs queue
+  instead of racing. Runs the new `scripts/run_feature_pipeline.py`.
+- `.github/workflows/training_pipeline.yml` — daily (`cron: "40 2 * * *"`
+  UTC) + `workflow_dispatch`. Runs `train.py` → `check_registry_after_training.py
+  --name us_aqi_next` → `train_multi_horizon.py` → the same check for
+  `us_aqi_h24`/`h48`/`h72`.
+- Both set `HOPSWORKS_API_KEY`/`HOPSWORKS_PROJECT_NAME` from
+  `${{ secrets.* }}` as job-level env vars.
+- `scripts/run_feature_pipeline.py` deliberately re-fetches a rolling
+  `DEFAULT_HISTORY_DAYS = 4` window via `fetch.historical()` +
+  `build_features()` — **not** `fetch.latest_hour()` — because lag/rolling
+  features need days of prior context a single new row can't supply. This
+  turned out to also make the pipeline self-healing against GitHub's
+  scheduling unreliability (below): a skipped hour's data is picked up by the
+  next run automatically.
+- `scripts/check_registry_after_training.py` compares `list_versions(name)`'s
+  newest version against what `load_best_model(name)` actually serves, and
+  logs which one won. Deliberately no promotion-gating: `load_best_model`
+  already always serves the global-best-ever version, so a bad daily retrain
+  is harmless to what's served — logging the outcome is enough.
+
+### CI/CD debugging chain — four independent root causes, each diagnosed from a real error log, not guessed
+
+1. **`ERROR: No matching distribution found for xgboost==3.3.0`** on Python
+   3.11 runners — xgboost 3.3.0 requires Python ≥3.12 (confirmed against
+   PyPI's release history), while the real local `.venv` runs 3.13.3. Fixed:
+   `python-version` `"3.11"` → `"3.13"` in both workflow files.
+2. **`HOPSWORKS_API_KEY` / `HOPSWORKS_PROJECT_NAME` are not set`** — the
+   GitHub repo secrets had never actually been added. Fixed by adding both
+   manually under Settings → Secrets and variables → Actions.
+3. **`pyarrow._flight.FlightUnavailableError: Socket closed`** reading the
+   feature group — Hopsworks' Arrow Flight Query Service (a separate
+   port/service from the already-authenticated HTTPS API) is unreachable from
+   GitHub-hosted runners' rotating IPs. Fixed by adding
+   `read_options={"use_hive": True}` to `store.py`'s `.read()` call, forcing
+   the documented Hive/Spark fallback instead of Arrow Flight. Confirmed
+   working after deploy (commit `7ffaaef`).
+4. **The hourly feature-pipeline cron actually firing every 2–4 hours, not
+   hourly** — confirmed as a known, documented GitHub Actions limitation
+   (`schedule` is best-effort shared infrastructure, not a guarantee), not a
+   config bug. Accepted as-is: the 4-day rolling fetch window in
+   `run_feature_pipeline.py` makes a delayed or skipped run self-healing, with
+   no real data-completeness cost.
+
+Out of scope for this phase: the LSTM (Phase 6), statistical baselines
+(Phase 7), EDA/alerting (Phase 8), and Streamlit Cloud deployment (still
+manual, see Phase 4).
 
 ## Phase 6 – LSTM deep learning model — done
 
