@@ -27,3 +27,7 @@ deltalake==1.6.3
 # login. On Linux/macOS the real sdist builds fine, so the marker skips the shim.
 ./vendor/twofish ; platform_system == "Windows"
 
+# Install this project itself in editable mode so `aqi_predictor` is
+# importable - Streamlit Cloud only runs `pip install -r requirements.txt`,
+# it never runs a separate `pip install -e .` the way local setup did.
+-e .
