@@ -172,6 +172,45 @@ def check_app_renders_with_shap() -> None:
     )
 
 
+def check_hazard_banner() -> None:
+    """The hazard banner renders (naming the triggering horizon) when any of
+    'current' / the four forecasts is Hazardous (US AQI > 300), and is absent
+    entirely when nothing is - reusing the same result dict app.py already
+    has in hand, no new fetch."""
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    from aqi_predictor.inference_pipeline import predict
+
+    hazardous_result = _synthetic_forecast()
+    hazardous_result["current"]["us_aqi"] = 350.0  # forces "now" into Hazardous
+
+    st.cache_data.clear()
+    with patch.object(predict, "forecast", return_value=hazardous_result):
+        at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
+
+    assert not at.exception, at.exception
+    # "hazard-banner" alone would false-positive on the always-rendered CSS
+    # block (it defines the .hazard-banner class); the banner's own text is
+    # the only thing that appears solely when the div itself is rendered.
+    banner_html = " ".join(m.value for m in at.markdown if "HAZARDOUS AIR QUALITY" in m.value)
+    assert banner_html
+    assert "now" in banner_html
+
+    clean_result = _synthetic_forecast()  # every value comfortably under 300
+    st.cache_data.clear()
+    with patch.object(predict, "forecast", return_value=clean_result):
+        at_clean = AppTest.from_file(_APP_PATH, default_timeout=60).run()
+
+    assert not at_clean.exception, at_clean.exception
+    assert not any("HAZARDOUS AIR QUALITY" in m.value for m in at_clean.markdown)
+
+    print(
+        "ok  hazard banner: renders naming the triggering horizon(s) when "
+        "Hazardous is present, absent entirely otherwise"
+    )
+
+
 def check_app_renders() -> None:
     import streamlit as st
     from streamlit.testing.v1 import AppTest
@@ -217,6 +256,7 @@ def main() -> int:
     check_forecast_dict_shape()
     check_app_renders()
     check_app_renders_with_shap()
+    check_hazard_banner()
     print("\nall dashboard smoke checks passed")
     return 0
 

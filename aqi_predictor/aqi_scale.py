@@ -19,6 +19,14 @@ _BREAKPOINTS: list[tuple[float, str, str]] = [
 ]
 _HAZARDOUS: tuple[str, str] = ("Hazardous", "#7e0023")
 
+# Every category's (label, colour), worst-to-best-independent order (Good ->
+# Hazardous) - derived from the same breakpoint data ``aqi_category`` uses, so
+# callers needing the full category list (e.g. a distribution chart) don't
+# hardcode a second copy of the labels/colours.
+CATEGORIES: list[tuple[str, str]] = [(label, colour) for _upper, label, colour in _BREAKPOINTS] + [
+    _HAZARDOUS
+]
+
 
 def aqi_category(value: float) -> tuple[str, str]:
     """Return ``(label, colour_hex)`` for a US AQI ``value``.
@@ -34,3 +42,20 @@ def aqi_category(value: float) -> tuple[str, str]:
         if v <= upper:
             return label, colour
     return _HAZARDOUS
+
+
+def hazardous_horizons(current: dict, forecasts: list[dict]) -> list[str]:
+    """Which of ``current`` / each forecast entry is in the "Hazardous"
+    category, as human-readable labels (``"now"``, ``"+24h"``, ...).
+
+    Takes the same ``current`` / ``forecasts`` dicts
+    ``predict.forecast()`` already returns - no new fetch needed. Empty list
+    if nothing is hazardous.
+    """
+    hazardous: list[str] = []
+    if aqi_category(current["us_aqi"])[0] == "Hazardous":
+        hazardous.append("now")
+    for fc in forecasts:
+        if aqi_category(fc["predicted_us_aqi"])[0] == "Hazardous":
+            hazardous.append(f"+{fc['horizon_hours']}h")
+    return hazardous

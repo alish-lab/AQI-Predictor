@@ -588,3 +588,96 @@ added to the test suite.
 Out of scope for this phase (as instructed): calling `register_model` for
 either baseline; changing `load_best_model`'s selection logic; tuning SARIMA
 beyond the fixed order.
+
+## Phase 8 – EDA + hazardous-AQI alerting — done
+
+**What changed.**
+
+- **`aqi_predictor/dashboard/eda_charts.py`** (new) – four chart functions
+  (`trend_and_gaps`, `seasonality_patterns`, `category_distribution`,
+  `feature_correlation`), each taking a single-location engineered feature
+  frame and returning an Altair chart. Shared verbatim by the notebook and the
+  new dashboard page – neither writes the analysis logic itself.
+  `alt.data_transformers.disable_max_rows()` is set at module import: Altair's
+  default 5000-row cap doesn't survive contact with an 18k+ row real feature
+  store (`MaxRowsError`, hit while building the notebook – see below).
+  `trend_and_gaps` additionally resamples its *line* to a daily mean above
+  ~2000 hourly points (gap detection still runs on the full hourly index, so
+  a gap doesn't need to span a whole day to still show), keeping the embedded
+  Vega-Lite spec small.
+- **`notebooks/eda.ipynb`** (new) – four short sections (one chart + a
+  couple of sentences each) built with `nbformat`/`nbclient` against the real
+  Hopsworks feature store + model registry, executed so outputs are saved in
+  the file. `nbformat`/`nbclient`/`ipykernel` were installed locally to author
+  and run it once; they are not added to `requirements.txt` since nothing in
+  the shipped app/pipelines needs them at runtime.
+- **`aqi_predictor/dashboard/pages/1_Data_Insights.py`** (new) – Streamlit's
+  native multipage convention (a `pages/` folder next to `app.py`, which had
+  no existing `pages/` to conflict with). Same location-selector pattern as
+  `app.py`'s `main()` (`st.selectbox` over `LOCATIONS`, `format_func=str.title`)
+  – no second way to pick a location. `store.get_feature_view(...)` is wrapped
+  in `st.cache_data(ttl=1200)` so navigating back and forth doesn't re-hit
+  Hopsworks.
+- **`aqi_scale.py`** – added `CATEGORIES` (the full ordered `(label, colour)`
+  list, derived from the existing private breakpoint data instead of a second
+  hardcoded copy) and `hazardous_horizons(current, forecasts)`, which checks
+  `predict.forecast()`'s own `current`/`forecasts` dicts against the real
+  "Hazardous" threshold already in `aqi_category` (> 300) and returns which
+  entries triggered it (e.g. `["now", "+24h"]`).
+- **`app.py`** – calls `hazardous_horizons` right after `load_forecast`
+  succeeds (no new fetch) and renders a red, top-of-page banner above the
+  stat cards naming the triggering horizon(s) when the list is non-empty; no
+  banner otherwise. Banner-only: no email, no new GitHub secret, no workflow
+  change, no dedup/cooldown – it's a live check computed at render time, not
+  a pipeline step.
+
+**Real seasonality findings (Karachi, full Hopsworks feature store;
+2026-09-06)** – the user asked whether this is actually interesting before
+it goes in the final report:
+
+- **Month-of-year: yes, strongly.** Mean `us_aqi` swings ~36 points across
+  the year – highs of 108.8 in December/January, a low of 72.9 in September.
+  Winter (Nov-Feb, 94-109) vs. monsoon season (Aug-Sep, 73-75) is a large,
+  physically sensible gap (temperature inversions + winter burning vs.
+  monsoon rain washing out particulates) and is worth featuring.
+- **Hour-of-day: weak, in UTC.** Only a ~5.9-point range - flat at ~86.4-86.5
+  most of the day with a modest bump to 92.3 around 13:00-14:00 UTC
+  (18:00-19:00 Karachi local time, i.e. evening rush hour/cooking - plausible,
+  but a small effect in the aggregate). Worth a passing mention, not a
+  headline.
+- **Correlation vs. SHAP cross-check (us_aqi_next, served v4 random_forest):**
+  raw correlation with `us_aqi` ranks `pm2_5` highest (0.726); the served
+  model's SHAP global importance (excluding `us_aqi` itself, trivially
+  dominant for a 1h-ahead near-persistence task) ranks `pm2_5_roll_mean_24h`
+  highest. Both independently point to pm2.5 as the dominant driver - a
+  useful, honest cross-check rather than a discrepancy.
+
+**Definition-of-done verification.** The Claude-in-Chrome browser extension
+was not connected in this environment, so a literal click-through visual
+check wasn't possible - said so rather than claiming it. Verified instead
+with the strongest available non-browser equivalents: `streamlit run` in the
+background + `curl` confirmed both `/` and `/Data_Insights` return HTTP 200
+(Streamlit's own multipage routing picked up the new page); real
+(un-mocked) `AppTest` runs against live Hopsworks data for both scripts
+showed no exceptions, all four `Data Insights` section headers rendering,
+and the hazard banner correctly absent under real current conditions (no
+horizon is currently Hazardous). The forced-hazardous case is covered by
+`tests/smoke_dashboard.py`'s `check_hazard_banner`, which runs the real
+`app.py` end to end via `AppTest` with a forced Hazardous value and asserts
+the banner text appears (and a separate clean run asserts it's absent) -
+the same mechanism used throughout this project's dashboard tests, just
+short of an actual browser window.
+
+**Tests.** `tests/smoke_eda_charts.py` (new) – each of the four chart
+functions runs against a small synthetic dataframe with no crash, plus a
+large-synthetic-dataset check exercising the daily-resample branch.
+`tests/smoke_dashboard.py` – added `check_hazard_banner` (forces "now" into
+Hazardous, asserts the banner text and triggering horizon appear; a clean
+forecast asserts it's entirely absent - the first assertion attempt
+false-positived on the `.hazard-banner` CSS class always being present in
+injected `<style>`, fixed by checking for the banner's own text instead of
+the class name). All six `tests/smoke_*.py` files pass.
+
+Out of scope for this phase (as instructed): the training/registry/predict
+pipelines; any GitHub Actions secret or workflow change; a second
+location-selection UI.

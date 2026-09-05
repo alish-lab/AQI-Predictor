@@ -15,7 +15,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from aqi_predictor.aqi_scale import aqi_category
+from aqi_predictor.aqi_scale import aqi_category, hazardous_horizons
 from aqi_predictor.config import LOCATIONS
 from aqi_predictor.inference_pipeline import predict
 
@@ -64,8 +64,33 @@ _CARD_CSS = """
     opacity: 0.5;
     margin-top: 0.5rem;
 }
+.hazard-banner {
+    background: #7e0023;
+    color: #ffffff;
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 1.1rem;
+    font-weight: 700;
+    font-size: 0.95rem;
+    box-shadow: 0 2px 10px rgba(126, 0, 35, 0.4);
+}
 </style>
 """
+
+
+def _hazard_banner_html(horizons: list[str]) -> str:
+    """Prominent top-of-page banner naming which horizon(s) triggered it.
+
+    ``horizons`` is whatever :func:`aqi_scale.hazardous_horizons` returns
+    (e.g. ``["now", "+24h"]``) - always non-empty when this is called.
+    """
+    where = ", ".join(horizons)
+    return (
+        '<div class="hazard-banner">'
+        f"HAZARDOUS AIR QUALITY (US AQI &gt; 300) predicted at: {where}. "
+        "Limit outdoor exposure."
+        "</div>"
+    )
 
 
 @st.cache_data(ttl=1200, show_spinner="Fetching live forecast…")
@@ -349,6 +374,10 @@ def main() -> None:
             f"`{type(exc).__name__}: {exc}`"
         )
         return
+
+    hazardous = hazardous_horizons(result["current"], result["forecasts"])
+    if hazardous:
+        st.markdown(_hazard_banner_html(hazardous), unsafe_allow_html=True)
 
     _render(result)
 
