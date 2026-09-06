@@ -263,8 +263,8 @@ def _trend_chart(recent: pd.DataFrame) -> alt.LayerChart:
     )
     return (
         alt.layer(band_layer, halo, line)
-        .properties(height=270)
-        .configure_view(stroke=None)
+        .properties(height=270, background="transparent")
+        .configure_view(stroke=None, fill=None)
     )
 
 
@@ -312,7 +312,7 @@ def _forecast_chart(fc: pd.DataFrame) -> alt.LayerChart:
             text=alt.value("Predicted Peak"),
         )
     )
-    return alt.layer(bars, labels, peak_text).properties(height=270).configure_view(stroke=None)
+    return alt.layer(bars, labels, peak_text).properties(height=270, background="transparent").configure_view(stroke=None, fill=None)
 
 
 _SHAP_UP_COLOUR = "#e2434d"   # pushes predicted AQI up (worse air)
@@ -343,8 +343,8 @@ def _local_shap_chart(top_features: list[dict]) -> alt.Chart:
                 alt.Tooltip("shap_value:Q", title="SHAP value", format="+.2f"),
             ],
         )
-        .properties(height=220)
-        .configure_view(stroke=None)
+        .properties(height=220, background="transparent")
+        .configure_view(stroke=None, fill=None)
     )
 
 
@@ -366,8 +366,8 @@ def _global_shap_chart(shap_importance: dict[str, float], top_n: int = 10) -> al
                 alt.Tooltip("mean_abs_shap:Q", title="mean |SHAP|", format=".3f"),
             ],
         )
-        .properties(height=220)
-        .configure_view(stroke=None)
+        .properties(height=220, background="transparent")
+        .configure_view(stroke=None, fill=None)
     )
 
 

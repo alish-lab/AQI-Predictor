@@ -1,0 +1,14 @@
+# Forces a light theme regardless of the viewer's browser/system preference.
+# Without this, native Streamlit chrome (headers, widget labels, the chart
+# component's own background) falls back to whatever the viewer's browser
+# defaults to - dark, in the case that surfaced the near-black chart panels
+# and near-invisible light-gray text. The custom gradient/glassmorphism CSS
+# in aqi_predictor/dashboard/theme.py still layers on top of this; this file
+# is the base theme those overrides assume.
+[theme]
+base = "light"
+primaryColor = "#5b8fb9"
+backgroundColor = "#eef3f4"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1a1a1a"
+font = "sans serif"
