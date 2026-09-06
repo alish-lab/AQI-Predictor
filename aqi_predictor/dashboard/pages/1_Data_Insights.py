@@ -54,15 +54,32 @@ def main() -> None:
         return
 
     st.subheader("Trend & data gaps")
+    st.caption(
+        "Observed US AQI over time. A shaded band marks a stretch of missing "
+        "data in the underlying feed, not a real drop in air quality."
+    )
     st.altair_chart(eda_charts.trend_and_gaps(df), width="stretch")
 
     st.subheader("Seasonality")
+    st.caption(
+        "Average AQI by hour of day and by month of year - this is where the "
+        "winter-vs-monsoon seasonal swing described in the report shows up."
+    )
     st.altair_chart(eda_charts.seasonality_patterns(df), width="stretch")
 
     st.subheader("Category distribution")
+    st.caption(
+        "How many hours historically fell into each AQI category (Good, "
+        "Moderate, Unhealthy, etc.) for this location."
+    )
     st.altair_chart(eda_charts.category_distribution(df), width="stretch")
 
     st.subheader("Feature correlation")
+    st.caption(
+        "How strongly each pollutant and weather variable moves together with "
+        "the others, including AQI itself. Darker red means they rise and fall "
+        "together; darker blue means one rises as the other falls."
+    )
     st.altair_chart(eda_charts.feature_correlation(df), width="stretch")
 
 

@@ -387,6 +387,10 @@ def _render_explain_section(fc: pd.DataFrame) -> None:
     out of the top stat-card row entirely.
     """
     st.subheader("Explain this forecast")
+    st.caption(
+        "Why the model predicted what it did for this specific forecast (left), "
+        "and which inputs it leans on most in general (right)."
+    )
     horizon_labels = list(fc["horizon_label"])
     chosen_label = st.selectbox("Horizon", horizon_labels, index=0, key="shap_horizon")
     chosen = fc.loc[fc["horizon_label"] == chosen_label].iloc[0]
@@ -397,6 +401,10 @@ def _render_explain_section(fc: pd.DataFrame) -> None:
         top_features = chosen.get("top_features")
         if top_features:
             st.altair_chart(_local_shap_chart(top_features), width="stretch")
+            st.caption(
+                "Red bars pushed this forecast's AQI higher; blue bars pulled it lower. "
+                "A longer bar means a bigger effect on this one prediction."
+            )
         else:
             st.caption(
                 f"No SHAP explanation available for {chosen['model']} (non-tree model)."
@@ -406,6 +414,10 @@ def _render_explain_section(fc: pd.DataFrame) -> None:
         shap_importance = chosen.get("shap_importance")
         if shap_importance:
             st.altair_chart(_global_shap_chart(shap_importance), width="stretch")
+            st.caption(
+                "The features this model relies on most across every prediction it "
+                "makes, not just this one - longer bars matter more overall."
+            )
         else:
             st.caption(f"No global SHAP importance available for {chosen['model_name']}.")
 
