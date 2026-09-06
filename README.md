@@ -1,5 +1,9 @@
 # AQI Predictor
 
+**Live demo:** [aqi-predictor-msucqzivflki39wmzn6mnk.streamlit.app](https://aqi-predictor-msucqzivflki39wmzn6mnk.streamlit.app/)
+
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://aqi-predictor-msucqzivflki39wmzn6mnk.streamlit.app/)
+
 Air-quality (US AQI) forecasting for Karachi using hourly Open-Meteo data. The
 project is organised as a set of pipelines:
 
