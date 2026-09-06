@@ -160,30 +160,34 @@ def evaluate_baselines() -> list[dict]:
 
 def ml_registered_rows() -> list[dict]:
     """Test metrics for the currently-served (lowest-test-RMSE) model at each
-    horizon, pulled from the registry - never retrained, never re-registered."""
+    horizon, pulled from the registry - never retrained, never re-registered.
+
+    Delegates the actual ``load_best_model`` loop to
+    ``registry.current_model_metrics`` (also used by the dashboard's "Model
+    Performance" table) rather than re-implementing it here.
+    """
+    names = [model_name(h) for h in HORIZONS]
+    by_name = {m["name"]: m for m in registry.current_model_metrics(names)}
+
     rows: list[dict] = []
     for horizon in HORIZONS:
         name = model_name(horizon)
-        try:
-            _model, meta = registry.load_best_model(name)
-        except FileNotFoundError:
+        m = by_name.get(name)
+        if m is None:
             print(f"[baselines] no registered model named {name!r}, skipping", flush=True)
             continue
 
-        metrics = meta.get("metrics") or {}
-        test_metrics = metrics.get("test") or {}
-        algorithm = metrics.get("algorithm", "ml")
         rows.append(
             {
-                "model": f"{algorithm} (served v{meta['version']})",
+                "model": f"{m['algorithm']} (served v{m['version']})",
                 # the registered models are trained pooled across every location in
                 # the feature store, not fit per location like the baselines -
                 # "all" is honest about that rather than implying a per-location fit.
                 "location": "all",
                 "horizon": horizon,
-                "rmse": test_metrics.get("rmse"),
-                "mae": test_metrics.get("mae"),
-                "r2": test_metrics.get("r2"),
+                "rmse": m["rmse"],
+                "mae": m["mae"],
+                "r2": m["r2"],
             }
         )
     return rows

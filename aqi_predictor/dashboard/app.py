@@ -20,6 +20,7 @@ from aqi_predictor.config import LOCATIONS
 from aqi_predictor.dashboard import theme
 from aqi_predictor.feature_pipeline import store
 from aqi_predictor.inference_pipeline import predict
+from aqi_predictor.training_pipeline import registry
 
 # hopsworks / hsfs stream tqdm progress bars to stdout; Streamlit captures stdout
 # per script run and the volume can stall the render. tqdm reads this on each bar
@@ -173,6 +174,14 @@ def load_latest_pollutants(location_name: str) -> dict[str, float] | None:
         for col in _POLLUTANT_LABELS
         if col in latest.index and pd.notna(latest[col])
     }
+
+
+@st.cache_data(ttl=1200, show_spinner=False)
+def load_model_performance(names: tuple[str, ...]) -> list[dict]:
+    """Cached wrapper around ``registry.current_model_metrics`` - a one-time
+    snapshot of whatever's currently served, not a historical trend. No new
+    registry queries beyond one ``load_best_model`` per name."""
+    return registry.current_model_metrics(list(names))
 
 
 def _text_on(hex_colour: str) -> str:
@@ -401,6 +410,37 @@ def _render_explain_section(fc: pd.DataFrame) -> None:
             st.caption(f"No global SHAP importance available for {chosen['model_name']}.")
 
 
+def _render_model_performance(fc: pd.DataFrame) -> None:
+    """Plain table: one row per forecast horizon, showing the currently
+    served model + its test RMSE/MAE/R2 - a one-time snapshot pulled from the
+    registry (``registry.current_model_metrics``, one ``load_best_model`` per
+    horizon), not a historical trend. No glass-card treatment needed for a
+    plain data table."""
+    names = tuple(fc["model_name"])
+    by_name = {m["name"]: m for m in load_model_performance(names)}
+
+    rows = []
+    for _, row in fc.iterrows():
+        m = by_name.get(row["model_name"])
+        if m is None:
+            continue
+        rows.append(
+            {
+                "horizon": row["horizon_label"],
+                "model": f"{m['algorithm']} v{m['version']}",
+                "RMSE": m["rmse"],
+                "MAE": m["mae"],
+                "R2": m["r2"],
+            }
+        )
+    if not rows:
+        return
+
+    st.subheader("Model Performance")
+    st.caption("Currently served model per horizon - a snapshot, not a historical trend.")
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+
+
 def _render(result: dict) -> None:
     cur = result["current"]
     by_horizon = {f["horizon_hours"]: f for f in result["forecasts"]}
@@ -445,6 +485,7 @@ def _render(result: dict) -> None:
             },
         )
 
+    _render_model_performance(fc)
     _render_explain_section(fc)
 
 

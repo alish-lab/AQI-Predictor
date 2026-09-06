@@ -7,6 +7,10 @@ site keeps working without edits):
 * ``list_versions(name) -> list[dict]``
 * ``load_model(name, version) -> (model, metadata)``
 * ``load_best_model(name) -> (model, metadata)``   - best = lowest test RMSE
+* ``current_model_metrics(names) -> list[dict]``   - a one-time snapshot of
+  each name's served version's test metrics (RMSE/MAE/R2, algorithm, version),
+  via ``load_best_model``; used by ``scripts/evaluate_baselines.py`` and the
+  dashboard's "Model Performance" table so neither re-implements the loop
 
 Each version is a Hopsworks *python* model whose uploaded artifact directory
 holds:
@@ -232,3 +236,34 @@ def load_best_model(name: str) -> tuple[Any, dict]:
         key=lambda m: (round(_test_rmse(m), _RMSE_COMPARISON_PRECISION), -int(m["version"])),
     )
     return load_model(name, best_meta["version"])
+
+
+def current_model_metrics(names: list[str]) -> list[dict]:
+    """Test RMSE/MAE/R2 + algorithm/version for the currently-served (best)
+    version of each name in ``names``, via :func:`load_best_model`.
+
+    A one-time snapshot of whatever's live right now, not a historical trend -
+    no querying beyond one ``load_best_model`` call per name. Any name with no
+    registered version at all is silently skipped (callers that need to report
+    that decide how to phrase it); the returned list is otherwise in the same
+    order as ``names``.
+    """
+    rows: list[dict] = []
+    for name in names:
+        try:
+            _model, meta = load_best_model(name)
+        except FileNotFoundError:
+            continue
+        metrics = meta.get("metrics") or {}
+        test_metrics = metrics.get("test") or {}
+        rows.append(
+            {
+                "name": name,
+                "version": meta["version"],
+                "algorithm": metrics.get("algorithm", "ml"),
+                "rmse": test_metrics.get("rmse"),
+                "mae": test_metrics.get("mae"),
+                "r2": test_metrics.get("r2"),
+            }
+        )
+    return rows

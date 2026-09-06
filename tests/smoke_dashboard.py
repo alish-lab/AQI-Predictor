@@ -12,10 +12,12 @@ Covers:
   right AQI numbers + category, the details expander holds all four rows, and a
   pipeline failure is caught and shown as ``st.error`` rather than crashing.
 
-Every ``AppTest`` run also patches ``store.get_feature_view`` - the sidebar's
-key-pollutants breakdown calls it directly (a separate read from
-``predict.forecast()``'s own return dict), so leaving it unpatched would make
-these "no network" checks hit Hopsworks for real.
+Every ``AppTest`` run also patches ``store.get_feature_view`` (the sidebar's
+key-pollutants breakdown calls it directly) and
+``registry.current_model_metrics`` (the "Model Performance" table calls it
+directly) - both are separate reads from ``predict.forecast()``'s own return
+dict, so leaving either unpatched would make these "no network" checks hit
+Hopsworks for real.
 """
 
 from __future__ import annotations
@@ -31,6 +33,16 @@ from aqi_predictor.aqi_scale import aqi_category
 _APP_PATH = str(
     Path(__file__).resolve().parents[1] / "aqi_predictor" / "dashboard" / "app.py"
 )
+
+
+def _fake_current_model_metrics(names: list[str]) -> list[dict]:
+    """Stand-in for ``registry.current_model_metrics`` - one row per
+    requested name, so it lines up with whatever ``model_name`` values the
+    synthetic forecast fixture happens to use."""
+    return [
+        {"name": n, "version": 2, "algorithm": "xgboost", "rmse": 1.0, "mae": 0.5, "r2": 0.9}
+        for n in names
+    ]
 
 
 def _synthetic_pollutant_df() -> pd.DataFrame:
@@ -179,6 +191,7 @@ def check_app_renders_with_shap() -> None:
 
     from aqi_predictor.feature_pipeline import store
     from aqi_predictor.inference_pipeline import predict
+    from aqi_predictor.training_pipeline import registry
 
     result = _synthetic_forecast_with_shap()
 
@@ -186,6 +199,7 @@ def check_app_renders_with_shap() -> None:
     with (
         patch.object(predict, "forecast", return_value=result),
         patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+        patch.object(registry, "current_model_metrics", side_effect=_fake_current_model_metrics),
     ):
         at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
 
@@ -209,6 +223,7 @@ def check_hazard_banner() -> None:
 
     from aqi_predictor.feature_pipeline import store
     from aqi_predictor.inference_pipeline import predict
+    from aqi_predictor.training_pipeline import registry
 
     hazardous_result = _synthetic_forecast()
     hazardous_result["current"]["us_aqi"] = 350.0  # forces "now" into Hazardous
@@ -217,6 +232,7 @@ def check_hazard_banner() -> None:
     with (
         patch.object(predict, "forecast", return_value=hazardous_result),
         patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+        patch.object(registry, "current_model_metrics", side_effect=_fake_current_model_metrics),
     ):
         at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
 
@@ -233,6 +249,7 @@ def check_hazard_banner() -> None:
     with (
         patch.object(predict, "forecast", return_value=clean_result),
         patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+        patch.object(registry, "current_model_metrics", side_effect=_fake_current_model_metrics),
     ):
         at_clean = AppTest.from_file(_APP_PATH, default_timeout=60).run()
 
@@ -251,6 +268,7 @@ def check_app_renders() -> None:
 
     from aqi_predictor.feature_pipeline import store
     from aqi_predictor.inference_pipeline import predict
+    from aqi_predictor.training_pipeline import registry
 
     result = _synthetic_forecast()
 
@@ -258,6 +276,7 @@ def check_app_renders() -> None:
     with (
         patch.object(predict, "forecast", return_value=result),
         patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+        patch.object(registry, "current_model_metrics", side_effect=_fake_current_model_metrics),
     ):
         at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
 
@@ -273,16 +292,26 @@ def check_app_renders() -> None:
         assert f">{value:.0f}<" in card_html, (label, value, card_html[:300])
     assert "Moderate" in card_html  # every synthetic value sits in one category
 
-    # the details expander holds the full 4-row forecast table
-    assert len(at.dataframe) == 1
+    # the details expander holds the full 4-row forecast table, and the new
+    # Model Performance table holds one row per horizon (from the mocked
+    # registry.current_model_metrics, not a real registry query)
+    assert len(at.dataframe) == 2
     assert len(at.dataframe[0].value) == 4
     assert list(at.dataframe[0].value["horizon_hours"]) == [1, 24, 48, 72]
+
+    perf_df = at.dataframe[1].value
+    assert len(perf_df) == 4
+    assert list(perf_df["horizon"]) == ["+1h", "+24h", "+48h", "+72h"]
+    assert all(v == "xgboost v2" for v in perf_df["model"])
+    assert list(perf_df["RMSE"]) == [1.0, 1.0, 1.0, 1.0]
+    assert "Model Performance" in " ".join(s.value for s in at.subheader)
 
     # a pipeline failure is caught, not raised
     st.cache_data.clear()
     with (
         patch.object(predict, "forecast", side_effect=RuntimeError("boom")),
         patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+        patch.object(registry, "current_model_metrics", side_effect=_fake_current_model_metrics),
     ):
         at_err = AppTest.from_file(_APP_PATH, default_timeout=60).run()
     assert not at_err.exception
