@@ -15,10 +15,11 @@ from __future__ import annotations
 import streamlit as st
 
 from aqi_predictor.config import LOCATIONS
-from aqi_predictor.dashboard import eda_charts
+from aqi_predictor.dashboard import eda_charts, theme
 from aqi_predictor.feature_pipeline import store
 
 st.set_page_config(page_title="AQI Predictor - Data Insights", page_icon="📊", layout="centered")
+st.markdown(theme.BACKGROUND_CSS, unsafe_allow_html=True)
 
 # Far-apart bounds so a single call pulls the whole feature store for one
 # location, mirroring dataset.py's _FULL_START/_FULL_END.

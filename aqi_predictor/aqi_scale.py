@@ -1,23 +1,33 @@
 """US AQI category + colour lookup.
 
-Standard US EPA AQI breakpoints. Shared across the project (the dashboard, and a
-later hazardous-AQI alerting phase) - kept dependency-free on purpose, no
-Streamlit / pandas import here.
+Standard US EPA AQI breakpoints (thresholds unchanged). Shared across the
+project (the dashboard, and hazardous-AQI alerting) - kept dependency-free on
+purpose, no Streamlit / pandas import here.
+
+The colours are a muted pastel-to-saturated palette (not the vivid official
+AirNow one) that visibly escalates toward the top of the scale: soft and
+calm for Good/Moderate, progressively more saturated through Unhealthy for
+Sensitive Groups / Unhealthy / Very Unhealthy, darkest and most saturated at
+Hazardous - so worsening air quality reads as increasingly urgent rather than
+all six categories looking equally soft. The dashboard's hazard banner
+(``app.py``'s ``.hazard-banner``) is deliberately independent of this palette
+- it stays a fixed, bold, saturated red regardless of this module's colours,
+since it's a safety-critical element that must never look "on theme."
 """
 
 from __future__ import annotations
 
 import math
 
-# (inclusive upper bound, label, hex colour) - official AirNow palette.
+# (inclusive upper bound, label, hex colour) - muted pastel-to-saturated scale.
 _BREAKPOINTS: list[tuple[float, str, str]] = [
-    (50, "Good", "#00e400"),
-    (100, "Moderate", "#ffff00"),
-    (150, "Unhealthy for Sensitive Groups", "#ff7e00"),
-    (200, "Unhealthy", "#ff0000"),
-    (300, "Very Unhealthy", "#8f3f97"),
+    (50, "Good", "#B7E4C7"),  # soft mint
+    (100, "Moderate", "#F0E6A6"),  # soft sand / muted yellow
+    (150, "Unhealthy for Sensitive Groups", "#F3C393"),  # soft peach
+    (200, "Unhealthy", "#D98C87"),  # muted dusty rose
+    (300, "Very Unhealthy", "#A15C7A"),  # deeper rose-mauve, more saturated
 ]
-_HAZARDOUS: tuple[str, str] = ("Hazardous", "#7e0023")
+_HAZARDOUS: tuple[str, str] = ("Hazardous", "#5C1A2E")  # deep muted maroon, darkest/most saturated
 
 # Every category's (label, colour), worst-to-best-independent order (Good ->
 # Hazardous) - derived from the same breakpoint data ``aqi_category`` uses, so

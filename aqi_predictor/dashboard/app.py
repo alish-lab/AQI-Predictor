@@ -15,8 +15,10 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from aqi_predictor.aqi_scale import aqi_category, hazardous_horizons
+from aqi_predictor.aqi_scale import CATEGORIES, aqi_category, hazardous_horizons
 from aqi_predictor.config import LOCATIONS
+from aqi_predictor.dashboard import theme
+from aqi_predictor.feature_pipeline import store
 from aqi_predictor.inference_pipeline import predict
 
 # hopsworks / hsfs stream tqdm progress bars to stdout; Streamlit captures stdout
@@ -33,10 +35,13 @@ _BAND_LOWERS = [0, 50, 100, 150, 200, 300]
 _CARD_CSS = """
 <style>
 .aqi-card {
-    border: 1px solid rgba(128, 128, 128, 0.22);
-    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    border-radius: 16px;
     padding: 0.9rem 1rem 0.85rem;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 6px 18px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 4px 24px rgba(31, 41, 55, 0.12), 0 1px 3px rgba(31, 41, 55, 0.06);
     height: 100%;
 }
 .aqi-card .aqi-card-label {
@@ -44,7 +49,7 @@ _CARD_CSS = """
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    opacity: 0.6;
+    opacity: 0.65;
 }
 .aqi-card .aqi-card-value {
     font-size: 2.4rem;
@@ -64,6 +69,23 @@ _CARD_CSS = """
     opacity: 0.5;
     margin-top: 0.5rem;
 }
+.legend-pill {
+    display: block;
+    padding: 0.3rem 0.6rem;
+    border-radius: 8px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+}
+.pollutant-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    padding: 0.2rem 0;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.15);
+}
+/* Deliberately NOT part of the pastel theme above - a safety-critical
+   element stays bold/saturated red regardless of the palette in aqi_scale.py. */
 .hazard-banner {
     background: #7e0023;
     color: #ffffff;
@@ -76,6 +98,28 @@ _CARD_CSS = """
 }
 </style>
 """
+
+
+# Decorative, category-appropriate weather-style glyphs next to each stat
+# card's label - plain unicode, no new asset/icon-font dependency. Purely a
+# display touch; falls back to no icon for an unrecognised label.
+_CATEGORY_ICON: dict[str, str] = {
+    "Good": "☀️",
+    "Moderate": "🌤️",
+    "Unhealthy for Sensitive Groups": "⛅",
+    "Unhealthy": "☁️",
+    "Very Unhealthy": "🌁",
+    "Hazardous": "🌫️",
+}
+
+_POLLUTANT_LABELS: dict[str, str] = {
+    "pm2_5": "PM2.5",
+    "pm10": "PM10",
+    "carbon_monoxide": "Carbon Monoxide",
+    "nitrogen_dioxide": "Nitrogen Dioxide",
+    "sulphur_dioxide": "Sulphur Dioxide",
+    "ozone": "Ozone",
+}
 
 
 def _hazard_banner_html(horizons: list[str]) -> str:
@@ -104,6 +148,29 @@ def load_forecast(location_name: str) -> dict:
     return predict.forecast(location_name)
 
 
+@st.cache_data(ttl=1200, show_spinner=False)
+def load_latest_pollutants(location_name: str) -> dict[str, float] | None:
+    """Latest stored pollutant readings for the sidebar breakdown.
+
+    A small, separate read via the same ``store.get_feature_view`` the Data
+    Insights page already uses - ``predict.forecast()``'s own return dict
+    isn't touched/extended for this, keeping the serving pipeline untouched.
+    ``None`` if nothing is stored yet for this location.
+    """
+    now = pd.Timestamp.now(tz="UTC")
+    start = (now - pd.Timedelta(days=2)).date().isoformat()
+    end = now.date().isoformat()
+    df = store.get_feature_view(start, end, locations=[location_name])
+    if df.empty:
+        return None
+    latest = df.sort_values("time").iloc[-1]
+    return {
+        col: float(latest[col])
+        for col in _POLLUTANT_LABELS
+        if col in latest.index and pd.notna(latest[col])
+    }
+
+
 def _text_on(hex_colour: str) -> str:
     """Readable text colour (near-black / white) for a solid ``hex_colour`` fill."""
     r, g, b = (int(hex_colour[i : i + 2], 16) for i in (1, 3, 5))
@@ -114,10 +181,11 @@ def _text_on(hex_colour: str) -> str:
 def _stat_card(label: str, value: float, timestamp: str) -> str:
     """HTML for one top-row stat card: big AQI number, category pill, timestamp."""
     cat_label, colour = aqi_category(value)
+    icon = _CATEGORY_ICON.get(cat_label, "")
     when = pd.to_datetime(timestamp).strftime("%b %d, %H:%M UTC")
     return (
         '<div class="aqi-card">'
-        f'<div class="aqi-card-label">{label}</div>'
+        f'<div class="aqi-card-label">{icon} {label}</div>'
         f'<div class="aqi-card-value">{value:.0f}</div>'
         f'<div class="aqi-card-pill" style="background:{colour};color:{_text_on(colour)}">'
         f"{cat_label}</div>"
@@ -164,7 +232,7 @@ def _trend_chart(recent: pd.DataFrame) -> alt.LayerChart:
     bands["x2"] = x_max
     band_layer = (
         alt.Chart(bands)
-        .mark_rect(opacity=0.22)
+        .mark_rect(opacity=0.13)
         .encode(
             x=alt.X("x:T", title=None),
             x2="x2:T",
@@ -180,8 +248,10 @@ def _trend_chart(recent: pd.DataFrame) -> alt.LayerChart:
         x=alt.X("time:T", title=None),
         y=alt.Y("us_aqi:Q", scale=y_scale, title="US AQI"),
     )
-    halo = line_enc.mark_line(color="#1a1a1a", strokeWidth=4)
-    line = line_enc.mark_line(color="#f5f5f5", strokeWidth=1.8).encode(
+    # interpolate="monotone" - a genuinely smooth curve is honest here: this is
+    # real hourly-resolution observed history, not sparse forecast points.
+    halo = line_enc.mark_line(color="#1a1a1a", strokeWidth=4, interpolate="monotone")
+    line = line_enc.mark_line(color="#f5f5f5", strokeWidth=1.8, interpolate="monotone").encode(
         tooltip=[
             alt.Tooltip("time:T", title="time (UTC)"),
             alt.Tooltip("us_aqi:Q", title="US AQI", format=".0f"),
@@ -225,7 +295,20 @@ def _forecast_chart(fc: pd.DataFrame) -> alt.LayerChart:
     labels = base.mark_text(
         dy=-7, fontWeight="bold", color="#f5f5f5", stroke="#1a1a1a", strokeWidth=0.5
     ).encode(text=alt.Text("predicted_us_aqi:Q", format=".0f"))
-    return alt.layer(bars, labels).properties(height=260).configure_view(stroke=None)
+
+    # Mark whichever of the 4 (sparse, not hourly) forecast points is highest -
+    # still bars, still visually honest about being 4 discrete predictions.
+    peak_row = fc.loc[[fc["predicted_us_aqi"].idxmax()]]
+    peak_text = (
+        alt.Chart(peak_row)
+        .mark_text(dy=-24, fontWeight="bold", fontSize=11, color="#5C1A2E")
+        .encode(
+            x=alt.X("horizon_label:N", sort=order),
+            y=alt.Y("predicted_us_aqi:Q"),
+            text=alt.value("Predicted Peak"),
+        )
+    )
+    return alt.layer(bars, labels, peak_text).properties(height=260).configure_view(stroke=None)
 
 
 _SHAP_UP_COLOUR = "#e2434d"   # pushes predicted AQI up (worse air)
@@ -359,12 +442,40 @@ def _render(result: dict) -> None:
     _render_explain_section(fc)
 
 
+def _render_sidebar(location: str) -> None:
+    """AQI scale legend (new palette) + a key-pollutants breakdown for the
+    selected location - reuses ``store.get_feature_view`` read-only, no
+    change to the serving pipeline."""
+    with st.sidebar:
+        st.markdown("### AQI Scale")
+        for label, colour in CATEGORIES:
+            st.markdown(
+                f'<div class="legend-pill" style="background:{colour};'
+                f'color:{_text_on(colour)}">{label}</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("### Key Pollutants")
+        pollutants = load_latest_pollutants(location)
+        if pollutants:
+            for col, val in pollutants.items():
+                st.markdown(
+                    f'<div class="pollutant-row"><span>{_POLLUTANT_LABELS[col]}</span>'
+                    f"<span>{val:.1f}</span></div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No recent pollutant data.")
+
+
 def main() -> None:
     st.title("🌫️ AQI Predictor")
+    st.markdown(theme.BACKGROUND_CSS, unsafe_allow_html=True)
     st.markdown(_CARD_CSS, unsafe_allow_html=True)
 
     names = [loc["name"] for loc in LOCATIONS]
     location = st.selectbox("Location", names, index=0, format_func=str.title)
+    _render_sidebar(location)
 
     try:
         result = load_forecast(location)

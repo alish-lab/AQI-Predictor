@@ -11,6 +11,11 @@ Covers:
   (via ``AppTest``, no network): no exception, the four stat cards carry the
   right AQI numbers + category, the details expander holds all four rows, and a
   pipeline failure is caught and shown as ``st.error`` rather than crashing.
+
+Every ``AppTest`` run also patches ``store.get_feature_view`` - the sidebar's
+key-pollutants breakdown calls it directly (a separate read from
+``predict.forecast()``'s own return dict), so leaving it unpatched would make
+these "no network" checks hit Hopsworks for real.
 """
 
 from __future__ import annotations
@@ -26,6 +31,24 @@ from aqi_predictor.aqi_scale import aqi_category
 _APP_PATH = str(
     Path(__file__).resolve().parents[1] / "aqi_predictor" / "dashboard" / "app.py"
 )
+
+
+def _synthetic_pollutant_df() -> pd.DataFrame:
+    """Stand-in for ``store.get_feature_view``'s return - just enough columns
+    for ``app.load_latest_pollutants`` to build its sidebar breakdown."""
+    now = pd.Timestamp("2026-09-01T08:00:00Z")
+    return pd.DataFrame(
+        {
+            "location": ["karachi"],
+            "time": [now],
+            "pm2_5": [35.2],
+            "pm10": [60.1],
+            "carbon_monoxide": [210.0],
+            "nitrogen_dioxide": [18.4],
+            "sulphur_dioxide": [6.1],
+            "ozone": [42.0],
+        }
+    )
 
 _EXPECTED_LABELS = {
     0: "Good",
@@ -154,12 +177,16 @@ def check_app_renders_with_shap() -> None:
     import streamlit as st
     from streamlit.testing.v1 import AppTest
 
+    from aqi_predictor.feature_pipeline import store
     from aqi_predictor.inference_pipeline import predict
 
     result = _synthetic_forecast_with_shap()
 
     st.cache_data.clear()
-    with patch.object(predict, "forecast", return_value=result):
+    with (
+        patch.object(predict, "forecast", return_value=result),
+        patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+    ):
         at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
 
     assert not at.exception, at.exception
@@ -180,13 +207,17 @@ def check_hazard_banner() -> None:
     import streamlit as st
     from streamlit.testing.v1 import AppTest
 
+    from aqi_predictor.feature_pipeline import store
     from aqi_predictor.inference_pipeline import predict
 
     hazardous_result = _synthetic_forecast()
     hazardous_result["current"]["us_aqi"] = 350.0  # forces "now" into Hazardous
 
     st.cache_data.clear()
-    with patch.object(predict, "forecast", return_value=hazardous_result):
+    with (
+        patch.object(predict, "forecast", return_value=hazardous_result),
+        patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+    ):
         at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
 
     assert not at.exception, at.exception
@@ -199,7 +230,10 @@ def check_hazard_banner() -> None:
 
     clean_result = _synthetic_forecast()  # every value comfortably under 300
     st.cache_data.clear()
-    with patch.object(predict, "forecast", return_value=clean_result):
+    with (
+        patch.object(predict, "forecast", return_value=clean_result),
+        patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+    ):
         at_clean = AppTest.from_file(_APP_PATH, default_timeout=60).run()
 
     assert not at_clean.exception, at_clean.exception
@@ -215,12 +249,16 @@ def check_app_renders() -> None:
     import streamlit as st
     from streamlit.testing.v1 import AppTest
 
+    from aqi_predictor.feature_pipeline import store
     from aqi_predictor.inference_pipeline import predict
 
     result = _synthetic_forecast()
 
     st.cache_data.clear()
-    with patch.object(predict, "forecast", return_value=result):
+    with (
+        patch.object(predict, "forecast", return_value=result),
+        patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+    ):
         at = AppTest.from_file(_APP_PATH, default_timeout=60).run()
 
     assert not at.exception, at.exception
@@ -242,7 +280,10 @@ def check_app_renders() -> None:
 
     # a pipeline failure is caught, not raised
     st.cache_data.clear()
-    with patch.object(predict, "forecast", side_effect=RuntimeError("boom")):
+    with (
+        patch.object(predict, "forecast", side_effect=RuntimeError("boom")),
+        patch.object(store, "get_feature_view", return_value=_synthetic_pollutant_df()),
+    ):
         at_err = AppTest.from_file(_APP_PATH, default_timeout=60).run()
     assert not at_err.exception
     assert any("Could not load" in e.value for e in at_err.error)
