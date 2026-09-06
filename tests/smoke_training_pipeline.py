@@ -28,8 +28,12 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 
-from aqi_predictor.training_pipeline import dataset, registry
-from aqi_predictor.training_pipeline.lstm_model import AQI_LSTM, build_sequences, train_lstm
+from aqi_predictor.training_pipeline import registry
+from aqi_predictor.training_pipeline.lstm_model import (
+    AQI_LSTM,
+    build_sequences,
+    train_lstm,
+)
 from aqi_predictor.training_pipeline.train import compute_shap_importance
 
 
@@ -40,14 +44,14 @@ from aqi_predictor.training_pipeline.train import compute_shap_importance
 # + joblib.load path.
 # --------------------------------------------------------------------------- #
 class _FakeModel:
-    def __init__(self, mr: "_FakeModelRegistry", name: str, metrics: dict) -> None:
+    def __init__(self, mr: _FakeModelRegistry, name: str, metrics: dict) -> None:
         self._mr = mr
         self.name = name
         self.training_metrics = dict(metrics)
         self.version: int | None = None
         self._dir: Path | None = None
 
-    def save(self, src_dir: str) -> "_FakeModel":
+    def save(self, src_dir: str) -> _FakeModel:
         self.version = self._mr._next_version(self.name)
         dst = Path(tempfile.mkdtemp(prefix=f"fakemr_{self.name}_v{self.version}_"))
         for item in Path(src_dir).iterdir():
@@ -61,7 +65,7 @@ class _FakeModel:
 
 
 class _FakeModelRegistryNS:
-    def __init__(self, mr: "_FakeModelRegistry") -> None:
+    def __init__(self, mr: _FakeModelRegistry) -> None:
         self._mr = mr
 
     def create_model(self, name: str, metrics: dict, description: str = "") -> _FakeModel:
@@ -404,7 +408,7 @@ def check_lstm_training_and_registry() -> None:
     data): checks it registers via ``extra_artifacts``, evaluates cleanly, and
     ``shap.GradientExplainer`` produces a global importance dict - all without
     touching Hopsworks or a real, full-size dataset."""
-    import aqi_predictor.training_pipeline.lstm_model as lstm_model
+    from aqi_predictor.training_pipeline import lstm_model
 
     raw = _synthetic(n_days=35, locations=("alpha",))
     frame = build_training_frame(raw)

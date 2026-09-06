@@ -32,8 +32,8 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 
-import scripts.evaluate_baselines as evaluate_baselines
 from aqi_predictor.training_pipeline import registry
+from scripts import evaluate_baselines
 from scripts.evaluate_baselines import (
     SARIMA_ORDER,
     SARIMA_SEASONAL_ORDER,
@@ -49,14 +49,14 @@ from scripts.evaluate_baselines import (
 # here rather than cross-imported so this file still runs standalone.
 # --------------------------------------------------------------------------- #
 class _FakeModel:
-    def __init__(self, mr: "_FakeModelRegistry", name: str, metrics: dict) -> None:
+    def __init__(self, mr: _FakeModelRegistry, name: str, metrics: dict) -> None:
         self._mr = mr
         self.name = name
         self.training_metrics = dict(metrics)
         self.version: int | None = None
         self._dir: Path | None = None
 
-    def save(self, src_dir: str) -> "_FakeModel":
+    def save(self, src_dir: str) -> _FakeModel:
         self.version = self._mr._next_version(self.name)
         dst = Path(tempfile.mkdtemp(prefix=f"fakemr_{self.name}_v{self.version}_"))
         for item in Path(src_dir).iterdir():
@@ -70,7 +70,7 @@ class _FakeModel:
 
 
 class _FakeModelRegistryNS:
-    def __init__(self, mr: "_FakeModelRegistry") -> None:
+    def __init__(self, mr: _FakeModelRegistry) -> None:
         self._mr = mr
 
     def create_model(self, name: str, metrics: dict, description: str = "") -> _FakeModel:

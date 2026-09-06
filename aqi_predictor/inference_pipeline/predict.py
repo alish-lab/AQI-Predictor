@@ -211,7 +211,7 @@ def _lstm_local_shap(
 
     per_feature = shap_values[0].sum(axis=0)  # signed sum across seq_len -> (n_features,)
     ranked = sorted(
-        zip(feature_columns, per_feature),
+        zip(feature_columns, per_feature, strict=True),
         key=lambda t: abs(t[1]),
         reverse=True,
     )[:_TOP_N_FEATURES]
@@ -235,7 +235,7 @@ def _local_shap_top_features(model, x: pd.DataFrame) -> list[dict] | None:
         return None
     shap_values = shap.TreeExplainer(model).shap_values(x)[0]
     ranked = sorted(
-        zip(x.columns, shap_values, x.iloc[0]),
+        zip(x.columns, shap_values, x.iloc[0], strict=True),
         key=lambda t: abs(t[1]),
         reverse=True,
     )[:_TOP_N_FEATURES]
@@ -299,7 +299,7 @@ def forecast(location_name: str) -> dict:
     recent_cut = now_time - pd.Timedelta(hours=RECENT_HOURS)
     recent = [
         {"time": t.isoformat(), "us_aqi": round(float(v), 1)}
-        for t, v in zip(observed["time"], observed["us_aqi"])
+        for t, v in zip(observed["time"], observed["us_aqi"], strict=True)
         if t >= recent_cut
     ]
 

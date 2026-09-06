@@ -455,7 +455,7 @@ def _render(result: dict) -> None:
         if f is not None:
             cards.append((f"+{horizon}h", f["predicted_us_aqi"], f["target_time"]))
 
-    for column, (label, value, timestamp) in zip(st.columns(len(cards)), cards):
+    for column, (label, value, timestamp) in zip(st.columns(len(cards)), cards, strict=True):
         column.markdown(_stat_card(label, value, timestamp), unsafe_allow_html=True)
 
     recent = pd.DataFrame(result.get("recent", []))

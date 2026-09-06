@@ -100,7 +100,7 @@ def _compute_lstm_shap_importance(lstm_context: dict) -> dict[str, float]:
     mean_abs = per_sample_importance.mean(axis=0)  # (n_features,)
     return {
         col: float(val)
-        for col, val in zip(lstm_context["feature_columns"], mean_abs)
+        for col, val in zip(lstm_context["feature_columns"], mean_abs, strict=True)
     }
 
 

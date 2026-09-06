@@ -4,14 +4,19 @@ Air-quality (US AQI) forecasting for Karachi using hourly Open-Meteo data. The
 project is organised as a set of pipelines:
 
 - **feature_pipeline** – fetch air-quality + weather from Open-Meteo, engineer
-  features, and store them (`fetch.py`, `features.py`, `store.py`).
-- **training_pipeline** – build the supervised dataset, train and compare models
-  for next-hour and direct +24h/+48h/+72h `us_aqi`, and register the best
-  (`dataset.py`, `train.py`, `train_multi_horizon.py`, `registry.py`).
+  features, and write them to a real Hopsworks Feature Store feature group
+  (`fetch.py`, `features.py`, `store.py`).
+- **training_pipeline** – build the supervised dataset, train and compare Ridge /
+  RandomForest / XGBoost / LSTM for next-hour and direct +24h/+48h/+72h `us_aqi`,
+  plus seasonal-naive/SARIMA baselines for comparison, and register the best in
+  the Hopsworks Model Registry (`dataset.py`, `train.py`, `train_multi_horizon.py`,
+  `lstm_model.py`, `registry.py`).
 - **inference_pipeline** – live multi-horizon forecast: current conditions +
   Open-Meteo weather forecast → `us_aqi` at +1h/+24h/+48h/+72h (`predict.py`).
-- **dashboard** – Streamlit app over the live forecast: current AQI + category
-  badge, 48h trend, 3-day forecast (`app.py`).
+- **dashboard** – Streamlit app (deployed on Streamlit Community Cloud) over the
+  live forecast: current AQI + category badge, trend/forecast charts, SHAP
+  explanations, model performance metrics, an EDA page, and hazardous-AQI
+  banner alerts (`app.py`, `pages/`, `eda_charts.py`, `aqi_scale.py`).
 
 The schema is multi-location from the start (every row carries a `location`
 key), though only Karachi is active. See [PROGRESS.md](PROGRESS.md) for the phase
@@ -26,13 +31,13 @@ aqi_predictor/
   feature_pipeline/
     fetch.py           Open-Meteo air-quality + weather, merged on (location, time)
     features.py        engineered features + missing-data handling
-    store.py           local parquet feature store (Hopsworks-shaped interface)
+    store.py           Hopsworks Feature Store integration (feature group read/write)
   training_pipeline/
     dataset.py         supervised frame (horizon_hours target) + time-ordered split
     train.py           Ridge / RandomForest / XGBoost for +1h, comparison, register best
     train_multi_horizon.py   direct +24h/+48h/+72h models, one registered per horizon
-    registry.py        local model registry (Hopsworks-shaped interface)
-    lstm_model.py       old code, deferred (currently unbuildable)
+    registry.py        Hopsworks Model Registry integration (register/load models)
+    lstm_model.py       LSTM sequence model - production, competes for all 4 horizons
   inference_pipeline/
     predict.py         live +1h/+24h/+48h/+72h forecast (real weather forecast)
   dashboard/
@@ -44,8 +49,10 @@ tests/
   smoke_training_pipeline.py    offline invariant checks (run with plain python)
   smoke_inference_pipeline.py   offline invariant checks (run with plain python)
   smoke_dashboard.py            offline invariant checks (run with plain python)
-data/                  local data, git-ignored (raw pulls + feature store)
-models/                local model registry + reports, git-ignored
+data/                  local data, git-ignored (raw pulls + local parquet staging,
+                       migrated to the real Hopsworks Feature Store)
+models/                training-comparison reports, git-ignored (the model registry
+                       itself is the Hopsworks Model Registry, not this folder)
 ```
 
 ## Setup

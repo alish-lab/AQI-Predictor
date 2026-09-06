@@ -40,7 +40,7 @@ def _missing_hour_spans(df: pd.DataFrame) -> pd.DataFrame:
 
     run_id = (missing != missing.shift()).cumsum()
     spans = []
-    for _run, idx in missing[missing].groupby(run_id[missing]).groups.items():
+    for idx in missing[missing].groupby(run_id[missing]).groups.values():
         spans.append({"start": idx.min(), "end": idx.max() + pd.Timedelta(hours=1)})
     return pd.DataFrame(spans)
 

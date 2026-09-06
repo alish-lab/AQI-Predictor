@@ -88,14 +88,14 @@ def _store_summary(locations: list[str]) -> dict:
     present = [c for c in base_cols if c in view.columns and c not in ("location", "time")]
     per_loc = {
         loc: {
-            "n_rows": int(len(g)),
+            "n_rows": len(g),
             "time_min": str(g["time"].min()),
             "time_max": str(g["time"].max()),
         }
         for loc, g in view.groupby("location")
     }
     return {
-        "n_rows": int(len(view)),
+        "n_rows": len(view),
         "n_columns": int(view.shape[1]),
         "time_min": str(view["time"].min()),
         "time_max": str(view["time"].max()),
