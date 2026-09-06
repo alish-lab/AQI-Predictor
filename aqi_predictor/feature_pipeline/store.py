@@ -111,9 +111,21 @@ def get_feature_view(
     """
     lo, hi = _to_utc_ts(start), _to_utc_ts(end)
 
-    raw = _feature_group().read(
-        dataframe_type="pandas", read_options={"use_hive": True}
-    )
+    # No read_options here on purpose. hsfs (client >= 4.0, installed: 5.0.6)
+    # reads offline data exclusively through Hopsworks' Arrow Flight "Query
+    # Service" - there is no working Hive/Spark SQL-string fallback in this
+    # client version despite the option existing in older docs/behaviour.
+    # {"use_hive": True} (the earlier Phase 5 attempt to dodge GitHub Actions'
+    # `FlightUnavailableError`) is dead code here: this version's query-support
+    # check only inspects a `use_spark` key, so `use_hive` was silently a no-op
+    # the whole time. If Arrow Flight can't be reached (e.g. outbound port 5005
+    # blocked on the caller's network), hsfs disables itself for the session
+    # and this .read() raises ValueError("Reading data with Hive is not
+    # supported when using hopsworks client version >= 4.0") - a genuine
+    # library limitation, not something read_options can route around. Callers
+    # that can tolerate a missing read (the dashboard sidebar) should catch
+    # around this call rather than expect a fallback.
+    raw = _feature_group().read(dataframe_type="pandas")
     if raw is None or len(raw) == 0:
         return pd.DataFrame()
 

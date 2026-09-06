@@ -503,16 +503,27 @@ def _render_sidebar(location: str) -> None:
             )
 
         st.markdown("### Key Pollutants")
-        pollutants = load_latest_pollutants(location)
-        if pollutants:
-            for col, val in pollutants.items():
-                st.markdown(
-                    f'<div class="pollutant-row"><span>{_POLLUTANT_LABELS[col]}</span>'
-                    f"<span>{val:.1f}</span></div>",
-                    unsafe_allow_html=True,
-                )
+        try:
+            pollutants = load_latest_pollutants(location)
+        except Exception:
+            # store.get_feature_view()'s only offline read path (Hopsworks'
+            # Arrow Flight Query Service) depends on live network reachability
+            # with no working fallback in the installed hsfs client - a
+            # transient failure here shouldn't take down the whole dashboard.
+            # See the comment above store.get_feature_view() for the full
+            # explanation.
+            pollutants = None
+            st.caption("Pollutant breakdown unavailable right now.")
         else:
-            st.caption("No recent pollutant data.")
+            if pollutants:
+                for col, val in pollutants.items():
+                    st.markdown(
+                        f'<div class="pollutant-row"><span>{_POLLUTANT_LABELS[col]}</span>'
+                        f"<span>{val:.1f}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.caption("No recent pollutant data.")
 
 
 def main() -> None:
