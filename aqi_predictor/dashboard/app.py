@@ -43,6 +43,10 @@ _CARD_CSS = """
     padding: 0.9rem 1rem 0.85rem;
     box-shadow: 0 4px 24px rgba(31, 41, 55, 0.12), 0 1px 3px rgba(31, 41, 55, 0.06);
     height: 100%;
+    /* the glass card is always light by design, so its text must always be
+       dark regardless of the viewer's Streamlit theme (light or dark) - don't
+       let it inherit ambient theme text color. */
+    color: #1a1a1a;
 }
 .aqi-card .aqi-card-label {
     font-size: 0.78rem;
@@ -250,7 +254,7 @@ def _trend_chart(recent: pd.DataFrame) -> alt.LayerChart:
     )
     # interpolate="monotone" - a genuinely smooth curve is honest here: this is
     # real hourly-resolution observed history, not sparse forecast points.
-    halo = line_enc.mark_line(color="#1a1a1a", strokeWidth=4, interpolate="monotone")
+    halo = line_enc.mark_line(color="#3b4a5a", strokeWidth=2.8, interpolate="monotone")
     line = line_enc.mark_line(color="#f5f5f5", strokeWidth=1.8, interpolate="monotone").encode(
         tooltip=[
             alt.Tooltip("time:T", title="time (UTC)"),
@@ -259,7 +263,7 @@ def _trend_chart(recent: pd.DataFrame) -> alt.LayerChart:
     )
     return (
         alt.layer(band_layer, halo, line)
-        .properties(height=280)
+        .properties(height=270)
         .configure_view(stroke=None)
     )
 
@@ -308,7 +312,7 @@ def _forecast_chart(fc: pd.DataFrame) -> alt.LayerChart:
             text=alt.value("Predicted Peak"),
         )
     )
-    return alt.layer(bars, labels, peak_text).properties(height=260).configure_view(stroke=None)
+    return alt.layer(bars, labels, peak_text).properties(height=270).configure_view(stroke=None)
 
 
 _SHAP_UP_COLOUR = "#e2434d"   # pushes predicted AQI up (worse air)
@@ -339,7 +343,7 @@ def _local_shap_chart(top_features: list[dict]) -> alt.Chart:
                 alt.Tooltip("shap_value:Q", title="SHAP value", format="+.2f"),
             ],
         )
-        .properties(height=180)
+        .properties(height=220)
         .configure_view(stroke=None)
     )
 
@@ -351,7 +355,9 @@ def _global_shap_chart(shap_importance: dict[str, float], top_n: int = 10) -> al
     order = df.sort_values("mean_abs_shap")["feature"].tolist()
     return (
         alt.Chart(df)
-        .mark_bar(color="#6b7280")
+        # muted slate from the restyle (matches the trend chart's halo), not
+        # the old flat gray left over from before the theme existed.
+        .mark_bar(color="#3b4a5a")
         .encode(
             y=alt.Y("feature:N", sort=order, title=None),
             x=alt.X("mean_abs_shap:Q", title="mean |SHAP value|"),
