@@ -277,10 +277,32 @@ friendly `st.error` and skips the rest of the page.
 
 Run locally: `streamlit run aqi_predictor/dashboard/app.py`
 
-**Deployment is a manual step, outside Claude Code.** After this is pushed,
-connect the GitHub repo on share.streamlit.io (main module
-`aqi_predictor/dashboard/app.py`), which installs `requirements.txt` and serves
-the app. No secrets are needed for the dashboard itself.
+**Deployed on Streamlit Community Cloud.** Connected the GitHub repo at
+share.streamlit.io (main module `aqi_predictor/dashboard/app.py`). Three real
+issues surfaced during deployment, none of them code bugs in the usual sense:
+
+- **Python version**: the app's Python-version setting defaulted to 3.14,
+  which is *too new* — `hopsworks==5.0.6` requires `<3.14,>=3.10`, while
+  `xgboost==3.3.0` requires `>=3.12` (same constraint that broke the GitHub
+  Actions workflows in Phase 5). The only versions satisfying both are 3.12 or
+  3.13 — set explicitly in the app's settings, not left on the platform
+  default.
+- **`ModuleNotFoundError: No module named 'aqi_predictor'`** despite a clean
+  dependency install: Streamlit Cloud only runs `pip install -r
+  requirements.txt`, it never separately runs `pip install -e .` the way local
+  setup did, so the project's own package was never actually installed. Fixed
+  by adding a trailing `-e .` line to `requirements.txt` itself.
+- **`confluent-kafka` (transitive, via Hopsworks) failed to build from
+  source** — `fatal error: librdkafka/rdkafka.h: No such file or directory`.
+  No prebuilt wheel for this platform/Python combo, and the system library
+  header it needs isn't in Streamlit Cloud's base image. Fixed with a new
+  `packages.txt` (Streamlit Cloud's mechanism for apt-installable system
+  deps) listing `librdkafka-dev`.
+
+Secrets **are** required (this note previously said otherwise, written before
+Phase 4.5's real Hopsworks integration existed) — `HOPSWORKS_API_KEY` and
+`HOPSWORKS_PROJECT_NAME`, added via the app's Secrets panel in TOML format,
+same two values used everywhere else in this project.
 
 - [x] `aqi_predictor/aqi_scale.py` – shared `aqi_category()`, no Streamlit import.
 - [x] `predict.forecast()` – added `"recent"` (reuses the already-fetched frame).
