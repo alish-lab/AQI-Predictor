@@ -540,6 +540,7 @@ def _render_sidebar(location: str) -> None:
 
 def main() -> None:
     st.title("🌫️ AQI Predictor")
+    st.caption("Forecasts US AQI up to 3 days ahead - now, +24h, +48h, and +72h.")
     st.markdown(theme.BACKGROUND_CSS, unsafe_allow_html=True)
     st.markdown(_CARD_CSS, unsafe_allow_html=True)
 
