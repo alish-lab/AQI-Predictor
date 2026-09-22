@@ -292,6 +292,10 @@ def check_app_renders() -> None:
         "Now" in card_html and "Next Hour" in card_html
         and "+24h" in card_html and "+72h" in card_html
     )
+    # timestamps display in Asia/Karachi (PKT, UTC+5), not UTC: _synthetic_forecast's
+    # "now" is 2026-09-01T08:00:00Z -> 13:00 PKT, not 08:00.
+    assert "13:00 PKT" in card_html, card_html[:400]
+    assert "08:00 UTC" not in card_html and "08:00" not in card_html, card_html[:400]
     for label, value in (
         ("Now", result["current"]["us_aqi"]),
         *(

@@ -29,6 +29,29 @@ os.environ.setdefault("TQDM_DISABLE", "1")
 
 st.set_page_config(page_title="AQI Predictor", page_icon="🌫️", layout="centered")
 
+# All timestamps from the pipeline (predict.py, the feature store) are UTC -
+# that's unchanged internally. This is purely a display-layer conversion for
+# the one location this dashboard serves today (Karachi): Pakistan doesn't
+# observe DST, so a fixed +5 offset via the IANA zone is exact, not an
+# approximation. If a non-Pakistan location is ever added, this becomes
+# per-location rather than a single dashboard-wide constant.
+DISPLAY_TZ = "Asia/Karachi"
+DISPLAY_TZ_LABEL = "PKT"
+
+
+def _to_display_tz(timestamp) -> pd.Timestamp:
+    """Parse an ISO timestamp (naive or tz-aware; naive is assumed UTC) and
+    return it converted to :data:`DISPLAY_TZ`."""
+    ts = pd.to_datetime(timestamp)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(DISPLAY_TZ)
+
+
+def _fmt_display_tz(timestamp) -> str:
+    return _to_display_tz(timestamp).strftime(f"%b %d, %H:%M {DISPLAY_TZ_LABEL}")
+
+
 # Lower bound of each US-EPA AQI category (the last band, 300+, is open-ended and
 # clipped to the chart's y-max at draw time).
 _BAND_LOWERS = [0, 50, 100, 150, 200, 300]
@@ -195,7 +218,7 @@ def _stat_card(label: str, value: float, timestamp: str) -> str:
     """HTML for one top-row stat card: big AQI number, category pill, timestamp."""
     cat_label, colour = aqi_category(value)
     icon = _CATEGORY_ICON.get(cat_label, "")
-    when = pd.to_datetime(timestamp).strftime("%b %d, %H:%M UTC")
+    when = _fmt_display_tz(timestamp)
     return (
         '<div class="aqi-card">'
         f'<div class="aqi-card-label">{icon} {label}</div>'
@@ -229,10 +252,13 @@ def _category_bands(y_max: float) -> pd.DataFrame:
 
 def _trend_chart(recent: pd.DataFrame) -> alt.LayerChart:
     """48h observed ``us_aqi`` line over translucent EPA category bands."""
-    # Vega-Lite mis-parses tz-aware ISO strings (drops every row -> blank chart);
-    # the data is all UTC, so hand it naive timestamps.
+    # Vega-Lite mis-parses tz-aware ISO strings (drops every row -> blank chart),
+    # so convert to the display timezone first, then hand it naive local-wall-clock
+    # timestamps (the data itself is UTC internally, unchanged).
     recent = recent.assign(
-        time=pd.to_datetime(recent["time"], utc=True).dt.tz_localize(None)
+        time=pd.to_datetime(recent["time"], utc=True)
+        .dt.tz_convert(DISPLAY_TZ)
+        .dt.tz_localize(None)
     )
     y_max = max(float(recent["us_aqi"].max()), 55.0) + 12.0
     y_scale = alt.Scale(domain=[0, y_max], nice=False)
@@ -266,7 +292,7 @@ def _trend_chart(recent: pd.DataFrame) -> alt.LayerChart:
     halo = line_enc.mark_line(color="#3b4a5a", strokeWidth=2.8, interpolate="monotone")
     line = line_enc.mark_line(color="#f5f5f5", strokeWidth=1.8, interpolate="monotone").encode(
         tooltip=[
-            alt.Tooltip("time:T", title="time (UTC)"),
+            alt.Tooltip("time:T", title=f"time ({DISPLAY_TZ_LABEL})"),
             alt.Tooltip("us_aqi:Q", title="US AQI", format=".0f"),
         ],
     )
@@ -280,7 +306,9 @@ def _trend_chart(recent: pd.DataFrame) -> alt.LayerChart:
 def _forecast_chart(fc: pd.DataFrame) -> alt.LayerChart:
     """One bar per horizon, each coloured by its own predicted category."""
     fc = fc.assign(
-        target_time=pd.to_datetime(fc["target_time"], utc=True).dt.tz_localize(None)
+        target_time=pd.to_datetime(fc["target_time"], utc=True)
+        .dt.tz_convert(DISPLAY_TZ)
+        .dt.tz_localize(None)
     )
     order = ["+1h", "+24h", "+48h", "+72h"]
     cat_colour = {row.category: row.colour for row in fc.itertuples()}
@@ -300,7 +328,7 @@ def _forecast_chart(fc: pd.DataFrame) -> alt.LayerChart:
         color=alt.Color("category:N", scale=colour_scale, legend=None),
         tooltip=[
             alt.Tooltip("horizon_label:N", title="horizon"),
-            alt.Tooltip("target_time:T", title="target time (UTC)"),
+            alt.Tooltip("target_time:T", title=f"target time ({DISPLAY_TZ_LABEL})"),
             alt.Tooltip("predicted_us_aqi:Q", title="US AQI", format=".0f"),
             alt.Tooltip("category:N", title="category"),
         ],
@@ -458,7 +486,8 @@ def _render(result: dict) -> None:
     by_horizon = {f["horizon_hours"]: f for f in result["forecasts"]}
 
     st.caption(
-        f"Current reading {cur['time']} · forecast generated {result['generated_at']}"
+        f"Current reading {_fmt_display_tz(cur['time'])} · "
+        f"forecast generated {_fmt_display_tz(result['generated_at'])}"
     )
 
     cards: list[tuple[str, float, str]] = [("Now", cur["us_aqi"], cur["time"])]
@@ -482,7 +511,10 @@ def _render(result: dict) -> None:
         st.altair_chart(_trend_chart(recent), width="stretch")
 
     fc = pd.DataFrame(result["forecasts"])
-    fc["target_time"] = pd.to_datetime(fc["target_time"])
+    # Kept in the display timezone from here on - _forecast_chart re-derives its
+    # own naive-local copy for Vega-Lite, but the "Forecast details" table below
+    # renders this column as-is, so it needs to already be in local time.
+    fc["target_time"] = pd.to_datetime(fc["target_time"], utc=True).dt.tz_convert(DISPLAY_TZ)
     fc["category"] = fc["predicted_us_aqi"].map(lambda v: aqi_category(v)[0])
     fc["colour"] = fc["predicted_us_aqi"].map(lambda v: aqi_category(v)[1])
     fc["model"] = fc["model_name"] + " v" + fc["model_version"].astype(str)
@@ -497,7 +529,7 @@ def _render(result: dict) -> None:
             hide_index=True,
             column_config={
                 "horizon_hours": "horizon (h)",
-                "target_time": "target time (UTC)",
+                "target_time": f"target time ({DISPLAY_TZ_LABEL})",
                 "predicted_us_aqi": "predicted US AQI",
             },
         )
