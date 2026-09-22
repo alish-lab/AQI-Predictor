@@ -117,6 +117,46 @@ def check_missing_data() -> None:
     print("ok  missing-data: <=3h gap interpolated, >3h gap dropped")
 
 
+def check_incremental_window_buffer() -> None:
+    """The bug ``ROLLING_CONTEXT_BUFFER_DAYS`` (in
+    ``scripts/run_feature_pipeline.py``) fixes: fetching *only* the
+    incremental pipeline's target window (no extra lookback) starves the
+    earliest ~24h of that window of rolling-window context, producing NaN
+    ``*_roll_mean_24h`` there purely from running out of history *within this
+    fetch* - not a real data gap - which would then get upserted over a
+    perfectly good value an earlier, better-contexted run had already stored.
+    Fetching one extra buffer day and dropping those rows before upserting
+    (what the real script now does) eliminates it. This exercises the
+    mechanism directly against ``build_features``, without needing the script
+    itself importable from here.
+    """
+    raw = _synthetic(n_hours=10 * 24)  # 10 days of continuous synthetic history
+    target_start = raw["time"].max() - pd.Timedelta(days=4)  # mirrors DEFAULT_HISTORY_DAYS
+
+    # Without the buffer: fetch == the target window only.
+    no_buffer_raw = raw[raw["time"] >= target_start]
+    no_buffer_feat, _ = build_features(no_buffer_raw)
+    assert no_buffer_feat["us_aqi_roll_mean_24h"].isna().any(), (
+        "expected the no-buffer case to reproduce the edge-effect NaN"
+    )
+
+    # With the buffer: fetch target window + 1 extra day, then drop the buffer
+    # rows (mirrors run_feature_pipeline.run_location's ROLLING_CONTEXT_BUFFER_DAYS=1).
+    buffered_raw = raw[raw["time"] >= target_start - pd.Timedelta(days=1)]
+    buffered_feat, _ = build_features(buffered_raw)
+    target_only = buffered_feat[buffered_feat["time"] >= target_start]
+    assert not target_only["us_aqi_roll_mean_24h"].isna().any(), (
+        "buffer should give every target-window row full 24h rolling context"
+    )
+    assert len(target_only) == len(no_buffer_feat)  # same rows, just fully populated now
+
+    print(
+        "ok  incremental window buffer: an unbuffered fetch starves the "
+        "earliest ~24h of rolling context (reproduces the real bug); a "
+        "1-day buffer, dropped before upsert, fixes it"
+    )
+
+
 def check_store_roundtrip() -> None:
     raw = _synthetic()
     feat, _ = build_features(raw)
@@ -145,6 +185,7 @@ def check_store_roundtrip() -> None:
 def main() -> int:
     check_no_leakage()
     check_missing_data()
+    check_incremental_window_buffer()
     check_store_roundtrip()
     print("\nall feature-pipeline smoke checks passed")
     return 0

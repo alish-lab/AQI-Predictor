@@ -132,6 +132,26 @@ def build_sequences(
     return np.stack(X_parts), np.array(y_parts, dtype="float64")
 
 
+def has_enough_data(splits: Splits, seq_len: int = SEQ_LEN) -> bool:
+    """``True`` if train/val/test each have at least one ``seq_len``-hour
+    contiguous window to build a sequence from.
+
+    This is exactly the precondition :func:`train_lstm` enforces by raising
+    ``RuntimeError`` when it isn't met - exposed separately so a caller
+    training several models (:func:`train.train_all`) can check *before*
+    calling ``train_lstm`` and skip it gracefully for a data-starved horizon,
+    instead of letting that ``RuntimeError`` propagate and take down every
+    other model for that horizon too. A genuinely small/short-history dataset
+    is expected to fail this at some horizons (a longer horizon drops more
+    tail rows) - that's not a bug, just not enough data for a 48h-window
+    model yet.
+    """
+    return all(
+        len(build_sequences(part, splits.feature_columns, splits.target, seq_len=seq_len)[0]) > 0
+        for part in (splits.train, splits.val, splits.test)
+    )
+
+
 def _fit_scaler(X_train: np.ndarray) -> StandardScaler:
     """Fit a ``StandardScaler`` on train-split feature values only."""
     n_features = X_train.shape[2]

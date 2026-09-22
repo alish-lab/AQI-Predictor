@@ -29,6 +29,16 @@ _SERIES_COLS = ["us_aqi", "pm2_5", "pm10"]
 _LAGS = [1, 2, 3]
 _ROLL_WINDOWS = [3, 6, 24]
 
+# The longest trailing lookback any engineered feature needs (the 24h rolling
+# window). Callers that fetch a *partial* window of raw history (the
+# incremental hourly pipeline, unlike backfill.py's full-history pull) need at
+# least this many hours of context *before* the earliest row they intend to
+# keep, or that row's rolling features come back NaN purely from running out
+# of history within the fetch - not a real data gap - and get upserted over
+# whatever a previous, better-contexted run had already stored for it. See
+# ``run_feature_pipeline.py``'s ``ROLLING_CONTEXT_BUFFER_DAYS``.
+MAX_ROLLING_WINDOW_HOURS = max(_ROLL_WINDOWS)
+
 _NUMERIC_COLS = [*POLLUTANT_VARS, *WEATHER_VARS]
 
 

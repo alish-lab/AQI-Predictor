@@ -24,7 +24,12 @@ from xgboost import XGBRegressor
 from aqi_predictor.config import MODELS_DIR
 from aqi_predictor.training_pipeline import registry
 from aqi_predictor.training_pipeline.dataset import Splits, split_dataset
-from aqi_predictor.training_pipeline.lstm_model import AQI_LSTM, train_lstm
+from aqi_predictor.training_pipeline.lstm_model import (
+    AQI_LSTM,
+    SEQ_LEN,
+    has_enough_data,
+    train_lstm,
+)
 from aqi_predictor.training_pipeline.metrics import regression_metrics
 
 MODEL_NAME = "us_aqi_next"
@@ -126,6 +131,18 @@ def compute_shap_importance(
 
 
 def train_all(splits: Splits) -> dict[str, dict]:
+    """Fit Ridge / RandomForest / XGBoost / LSTM and return each's result.
+
+    The LSTM is skipped - not the whole call failed - if this horizon doesn't
+    have at least one ``SEQ_LEN``-hour contiguous window in every split (e.g. a
+    long horizon whose tail-drop plus a short recent history leaves too little
+    to form a window): Ridge/RandomForest/XGBoost have no such requirement and
+    train fine regardless, so one model type's data shortfall for one horizon
+    should never take the others down with it. ``results`` simply won't have
+    an ``"lstm"`` key in that case - every caller already handles a subset of
+    model names (``_format_table``, ``min(results, key=...)``, ``best.get
+    ("lstm_context")``), so nothing downstream needs special-casing.
+    """
     X_train, y_train = splits.xy("train")
     X_val, y_val = splits.xy("val")
     X_test, y_test = splits.xy("test")
@@ -142,8 +159,16 @@ def train_all(splits: Splits) -> dict[str, dict]:
             },
         }
 
-    print(f"[train] fitting lstm on {len(X_train)} rows ...", flush=True)
-    results["lstm"] = train_lstm(splits)
+    if has_enough_data(splits):
+        print(f"[train] fitting lstm on {len(X_train)} rows ...", flush=True)
+        results["lstm"] = train_lstm(splits)
+    else:
+        print(
+            f"[train] WARNING: skipping lstm for target={splits.target!r} - "
+            f"not enough contiguous hourly rows in one or more splits to build "
+            f"a single {SEQ_LEN}h window; continuing with {list(results)}",
+            flush=True,
+        )
     return results
 
 

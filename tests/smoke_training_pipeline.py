@@ -319,6 +319,82 @@ def check_registry_roundtrip() -> None:
           "load_best picks lowest test RMSE (ties -> higher version)")
 
 
+def check_registry_xgboost_persistence() -> None:
+    """XGBoost models are saved via ``save_model()``/``load_model()`` (UBJSON),
+    not ``joblib.dump`` - a real ``predict()`` round-trip proves it, and
+    ``metadata["model_file"]`` records which format was used. Other model
+    types are untouched (LinearRegression stands in for Ridge/RandomForest
+    here; the plain joblib round-trip is already covered by
+    ``check_registry_roundtrip``)."""
+    from xgboost import XGBRegressor
+
+    project = _FakeProject(_FakeModelRegistry())
+    registry._project = lambda: project
+
+    X = np.arange(40).reshape(-1, 2).astype(float)
+    y = X[:, 0] * 2 + X[:, 1]
+    model = XGBRegressor(n_estimators=5, max_depth=2).fit(X, y)
+
+    v1 = registry.register_model(
+        "demo_xgb", model,
+        {"val": {"rmse": 1.0, "mae": 1.0, "r2": 0.9},
+         "test": {"rmse": 1.0, "mae": 1.0, "r2": 0.9}, "algorithm": "xgboost"},
+        ["f0", "f1"],
+    )
+    loaded_model, meta = registry.load_model("demo_xgb", v1)
+    assert meta["model_file"] == registry._XGBOOST_MODEL_FILE, meta["model_file"]
+    assert isinstance(loaded_model, XGBRegressor)
+    np.testing.assert_allclose(loaded_model.predict(X), model.predict(X))
+    print(
+        "ok  registry: XGBoost models persist via save_model()/load_model() "
+        "(UBJSON), predictions round-trip"
+    )
+
+
+def check_registry_skips_corrupted_version() -> None:
+    """A version whose artifact fails to deserialize is skipped (logged, not
+    raised) by ``list_versions``/``load_best_model``, which fall back to the
+    next-best loadable version instead of crashing the caller - this is the
+    actual live ``us_aqi_h72`` bug (a corrupted "best" XGBoost artifact used
+    to take down the whole request)."""
+    fake_mr = _FakeModelRegistry()
+    project = _FakeProject(fake_mr)
+    registry._project = lambda: project
+
+    X = np.arange(20).reshape(-1, 2).astype(float)
+    y = X.sum(axis=1)
+    good_worse = LinearRegression().fit(X, y)
+    good_better = LinearRegression().fit(X, y)
+
+    v1 = registry.register_model(
+        "demo_corrupt", good_worse,
+        {"val": {"rmse": 2.0}, "test": {"rmse": 2.0}, "algorithm": "linreg"},
+        ["f0", "f1"],
+    )
+    v2 = registry.register_model(
+        "demo_corrupt", good_better,
+        {"val": {"rmse": 0.5}, "test": {"rmse": 0.5}, "algorithm": "linreg"},  # best by RMSE
+        ["f0", "f1"],
+    )
+    # Corrupt v2's on-disk artifact, standing in for a bad pickle/xgboost buffer.
+    corrupt_dir = fake_mr._store[("demo_corrupt", v2)]._dir
+    (corrupt_dir / registry._MODEL_FILE).write_bytes(b"not a real pickle")
+
+    # list_versions must skip the corrupted v2, not crash, and still return v1.
+    versions = registry.list_versions("demo_corrupt")
+    assert [v["version"] for v in versions] == [v1], versions
+
+    # load_best_model must fall back from the corrupted "best" (v2) to v1.
+    model, meta = registry.load_best_model("demo_corrupt")
+    assert meta["version"] == v1, meta["version"]
+    np.testing.assert_allclose(model.predict(X), good_worse.predict(X))
+
+    print(
+        "ok  registry: a corrupted 'best' version is skipped (logged), "
+        "list_versions/load_best_model fall back to the next-loadable version"
+    )
+
+
 def check_registry_extra_artifacts() -> None:
     """``extra_artifacts`` (the LSTM's scaler + SHAP background) round-trip,
     and models registered without them (the four tree/linear models) still get
@@ -400,6 +476,50 @@ def check_lstm_build_sequences() -> None:
     print(
         "ok  lstm build_sequences: correct shape/target (no leakage), gaps "
         "dropped, no cross-location windows"
+    )
+
+
+def check_train_all_skips_lstm_gracefully() -> None:
+    """A split without enough contiguous rows for one 48h LSTM window must not
+    take down Ridge/RandomForest/XGBoost too - this is the actual live bug
+    that killed the daily ``train_multi_horizon`` job for +72h every day since
+    2026-09-16 (reproduced locally: ``train_lstm`` raising took the whole run
+    down before it ever reached ``us_aqi_h72``'s registration).
+
+    Built by hand (not ``split_dataset``, whose 14d/14d val/test split would
+    need an unwieldy amount of synthetic history to produce a *short* test
+    split while keeping train/val realistically sized) with a deliberately
+    tiny (10-row) test split - well under ``SEQ_LEN``, plenty for the other
+    three models to fit and evaluate on.
+    """
+    from aqi_predictor.training_pipeline import lstm_model
+    from aqi_predictor.training_pipeline.dataset import Splits, TARGET, feature_columns
+    from aqi_predictor.training_pipeline.train import train_all
+
+    raw = _synthetic(n_days=40, locations=("alpha",))
+    frame = build_training_frame(raw).sort_values("time").reset_index(drop=True)
+    feats = feature_columns(frame, TARGET)
+
+    splits = Splits(
+        train=frame.iloc[:600].reset_index(drop=True),
+        val=frame.iloc[600:900].reset_index(drop=True),
+        test=frame.iloc[900:910].reset_index(drop=True),  # 10 rows << SEQ_LEN=48
+        feature_columns=feats,
+        target=TARGET,
+    )
+    assert not lstm_model.has_enough_data(splits), (
+        "test setup assumption failed: this splits object should be too short for an LSTM window"
+    )
+
+    results = train_all(splits)  # must not raise
+    assert "lstm" not in results
+    assert {"ridge", "random_forest", "xgboost"} <= set(results)
+    for name, res in results.items():
+        assert set(res["metrics"]["test"]) == {"rmse", "mae", "r2"}
+
+    print(
+        "ok  train_all: a data-starved split skips lstm (logged) instead of "
+        "crashing - ridge/random_forest/xgboost still train"
     )
 
 
@@ -494,9 +614,12 @@ def main() -> int:
     check_split_non_default_horizon()
     check_split_no_overlap()
     check_registry_roundtrip()
+    check_registry_xgboost_persistence()
+    check_registry_skips_corrupted_version()
     check_registry_extra_artifacts()
     check_shap_importance()
     check_lstm_build_sequences()
+    check_train_all_skips_lstm_gracefully()
     check_lstm_training_and_registry()
 
     print("\nall training-pipeline smoke checks passed")
