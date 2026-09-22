@@ -8,9 +8,10 @@ Covers:
 * a ``forecast()``-shaped dict's ``recent`` / ``forecasts`` fields are
   well-formed - expected keys, parseable ISO timestamps,
 * the Streamlit app renders end to end against a stubbed ``predict.forecast``
-  (via ``AppTest``, no network): no exception, the four stat cards carry the
-  right AQI numbers + category, the details expander holds all four rows, and a
-  pipeline failure is caught and shown as ``st.error`` rather than crashing.
+  (via ``AppTest``, no network): no exception, the five stat cards (Now, Next
+  Hour, +24h, +48h, +72h) carry the right AQI numbers + category, the details
+  expander holds all four forecast rows, and a pipeline failure is caught and
+  shown as ``st.error`` rather than crashing.
 
 Every ``AppTest`` run also patches ``store.get_feature_view`` (the sidebar's
 key-pollutants breakdown calls it directly) and
@@ -282,12 +283,24 @@ def check_app_renders() -> None:
 
     assert not at.exception, at.exception
 
-    # the four stat cards are unsafe-HTML markdown blocks; each carries its number
+    # the five stat cards (Now, Next Hour, +24h, +48h, +72h) are unsafe-HTML
+    # markdown blocks; each carries its number. "Next Hour" (not "+1h") is
+    # deliberate - see _render's comment on why a bare "+1h" sitting next to
+    # "Now" reads as a near-duplicate rather than a distinct forecast.
     card_html = " ".join(m.value for m in at.markdown if "aqi-card" in m.value)
-    assert "Now" in card_html and "+24h" in card_html and "+72h" in card_html
+    assert (
+        "Now" in card_html and "Next Hour" in card_html
+        and "+24h" in card_html and "+72h" in card_html
+    )
     for label, value in (
         ("Now", result["current"]["us_aqi"]),
-        *((f"+{f['horizon_hours']}h", f["predicted_us_aqi"]) for f in result["forecasts"][1:]),
+        *(
+            (
+                "Next Hour" if f["horizon_hours"] == 1 else f"+{f['horizon_hours']}h",
+                f["predicted_us_aqi"],
+            )
+            for f in result["forecasts"]
+        ),
     ):
         assert f">{value:.0f}<" in card_html, (label, value, card_html[:300])
     assert "Moderate" in card_html  # every synthetic value sits in one category

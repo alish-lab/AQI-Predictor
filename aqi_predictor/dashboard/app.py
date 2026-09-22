@@ -462,10 +462,15 @@ def _render(result: dict) -> None:
     )
 
     cards: list[tuple[str, float, str]] = [("Now", cur["us_aqi"], cur["time"])]
-    for horizon in (24, 48, 72):
+    for horizon in (1, 24, 48, 72):
         f = by_horizon.get(horizon)
         if f is not None:
-            cards.append((f"+{horizon}h", f["predicted_us_aqi"], f["target_time"]))
+            # "Next Hour" (not "+1h") - a bare "+1h" sits right next to "Now" and,
+            # since the two values are usually close, reads more like a
+            # duplicate/typo than a distinct forecast. The other horizons don't
+            # have that problem: nothing else on the row could be mistaken for them.
+            label = "Next Hour" if horizon == 1 else f"+{horizon}h"
+            cards.append((label, f["predicted_us_aqi"], f["target_time"]))
 
     for column, (label, value, timestamp) in zip(st.columns(len(cards)), cards, strict=True):
         column.markdown(_stat_card(label, value, timestamp), unsafe_allow_html=True)
@@ -540,7 +545,7 @@ def _render_sidebar(location: str) -> None:
 
 def main() -> None:
     st.title("🌫️ AQI Predictor")
-    st.caption("Forecasts US AQI up to 3 days ahead - now, +24h, +48h, and +72h.")
+    st.caption("Forecasts US AQI up to 3 days ahead - now, next hour, +24h, +48h, and +72h.")
     st.markdown(theme.BACKGROUND_CSS, unsafe_allow_html=True)
     st.markdown(_CARD_CSS, unsafe_allow_html=True)
 
