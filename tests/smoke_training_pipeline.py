@@ -395,6 +395,58 @@ def check_registry_skips_corrupted_version() -> None:
     )
 
 
+def check_registry_rejects_bad_r2_candidate() -> None:
+    """A version with the numerically-lowest test RMSE but a test R2 at or
+    below the floor (:data:`registry._MIN_ACCEPTABLE_TEST_R2`) is rejected as
+    "best" and load_best_model falls back to the next-best version that
+    clears it - this is the actual live ``us_aqi_h24`` bug (v8: RMSE 3.73,
+    nominally the best of 21 versions, but R2 -0.76, evaluated against too
+    small/atypical a test split for RMSE alone to mean anything). A version
+    with no R2 recorded at all is passed through, not penalized for missing
+    data - the floor only disqualifies a *known-bad* value."""
+    fake_mr = _FakeModelRegistry()
+    project = _FakeProject(fake_mr)
+    registry._project = lambda: project
+
+    X = np.arange(20).reshape(-1, 2).astype(float)
+    y = X.sum(axis=1)
+    healthy = LinearRegression().fit(X, y)
+    degenerate = LinearRegression().fit(X, y)
+    no_r2_recorded = LinearRegression().fit(X, y)
+
+    v1 = registry.register_model(
+        "demo_r2", healthy,
+        {"val": {"rmse": 2.0, "r2": 0.9}, "test": {"rmse": 2.0, "r2": 0.9}, "algorithm": "linreg"},
+        ["f0", "f1"],
+    )
+    v2 = registry.register_model(
+        "demo_r2", degenerate,
+        # best by RMSE, but R2 is at the floor - must be rejected as "best"
+        {"val": {"rmse": 0.5, "r2": -0.5}, "test": {"rmse": 0.5, "r2": -0.5}, "algorithm": "linreg"},
+        ["f0", "f1"],
+    )
+
+    model, meta = registry.load_best_model("demo_r2")
+    assert meta["version"] == v1, meta["version"]  # v2 rejected despite lower RMSE
+    np.testing.assert_allclose(model.predict(X), healthy.predict(X))
+
+    # a version with no R2 in its metrics at all (missing, not bad) still
+    # competes normally on RMSE - and beats v1 here since nothing disqualifies it.
+    v3 = registry.register_model(
+        "demo_r2", no_r2_recorded,
+        {"val": {"rmse": 0.1}, "test": {"rmse": 0.1}, "algorithm": "linreg"},  # no "r2" key
+        ["f0", "f1"],
+    )
+    _model3, meta3 = registry.load_best_model("demo_r2")
+    assert meta3["version"] == v3, meta3["version"]
+
+    print(
+        "ok  registry: a best-by-RMSE candidate with test R2 <= floor is "
+        "rejected (logged), falls back to the next version that clears it; "
+        "missing R2 isn't penalized"
+    )
+
+
 def check_registry_extra_artifacts() -> None:
     """``extra_artifacts`` (the LSTM's scaler + SHAP background) round-trip,
     and models registered without them (the four tree/linear models) still get
@@ -616,6 +668,7 @@ def main() -> int:
     check_registry_roundtrip()
     check_registry_xgboost_persistence()
     check_registry_skips_corrupted_version()
+    check_registry_rejects_bad_r2_candidate()
     check_registry_extra_artifacts()
     check_shap_importance()
     check_lstm_build_sequences()

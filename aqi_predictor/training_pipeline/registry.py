@@ -45,19 +45,26 @@ holds:
   get back an empty dict, unchanged from before this existed.
 
 ``load_best_model`` picks the lowest-test-RMSE version *that actually
-deserializes*: it tries candidates in ascending-RMSE order and falls back to
-the next-best on any load failure (loudly ``print``-logged, matching this
-codebase's existing style rather than the stdlib ``logging`` module, which
-nothing else here uses), instead of crashing the caller (previously a
-dashboard/inference request for a horizon whose best-by-metric version was a
-corrupted artifact would hard-crash). ``list_versions`` does the same -
-skipping and logging any version that fails to load rather than aborting the
-whole listing, since ``scripts/check_registry_after_training.py`` and
+deserializes and clears a test-R2 floor* (:data:`_MIN_ACCEPTABLE_TEST_R2`): it
+tries candidates in ascending-RMSE order and falls back to the next-best on
+either a load failure or an at-or-below-floor R2 (both loudly ``print``-logged,
+matching this codebase's existing style rather than the stdlib ``logging``
+module, which nothing else here uses), instead of crashing the caller or
+silently serving a degenerate model. Previously a dashboard/inference request
+for a horizon whose best-by-metric version was a corrupted artifact would
+hard-crash (``us_aqi_h72``); separately, a version with the numerically-lowest
+RMSE but a negative R2 (evaluated against too small/atypical a test split for
+RMSE alone to mean anything - seen live: ``us_aqi_h24`` v8) would be served
+without complaint. The R2 floor only ever disqualifies a candidate - it never
+reorders the RMSE ranking among versions that pass it. ``list_versions`` skips
+and logs any version that fails to load (not the R2 floor - that check only
+applies to *selecting* a "best" version) rather than aborting the whole
+listing, since ``scripts/check_registry_after_training.py`` and
 ``load_best_model``'s own no-flat-metrics fallback both depend on it. An
 explicit ``load_model(name, version)`` for one exact version is unchanged -
-it still raises if that specific version is corrupted, since silently
-substituting a different version when the caller asked for one by number
-would be the wrong kind of "safe".
+it still raises if that specific version is corrupted, and it never applies
+the R2 floor, since silently substituting a different version when the caller
+asked for one by number would be the wrong kind of "safe".
 
 The Hopsworks model's own ``metrics`` field is a *flat numeric* subset
 (``test_rmse``/``val_rmse``/...) used only for the registry UI and for picking
@@ -98,6 +105,15 @@ _FLAT_METRIC_KEYS = ("rmse", "mae", "r2")
 # accuracy difference) breaks the version tie-break below.
 _RMSE_COMPARISON_PRECISION = 6
 
+# A version whose test R2 is at or below this is no better than predicting the
+# mean (0.0) - never eligible to be auto-served no matter how low its RMSE,
+# since a "good" RMSE alongside a negative R2 means the test split it was
+# evaluated on was too small/atypical for RMSE alone to mean anything (seen
+# live: us_aqi_h24 v8, RMSE 3.73 - nominally the best of 21 versions - but
+# R2 -0.76). This is a floor, not a ranking signal: it only ever disqualifies
+# a candidate, never reorders the RMSE-ranked list otherwise.
+_MIN_ACCEPTABLE_TEST_R2 = 0.0
+
 
 def _project():
     """Hopsworks project handle. Separate function so tests can monkeypatch it."""
@@ -135,6 +151,19 @@ def _test_rmse(metadata: dict) -> float:
         return float(metadata["metrics"]["test"]["rmse"])
     except (KeyError, TypeError, ValueError):
         return float("inf")
+
+
+def _test_r2(metadata: dict) -> float | None:
+    """Test R2 from full ``metadata.json``, or ``None`` if unavailable/unparseable.
+
+    ``None`` (not a sentinel number) so the :data:`_MIN_ACCEPTABLE_TEST_R2`
+    floor check can tell "known bad" apart from "unknown" - a version with no
+    parseable R2 is passed through rather than penalized for missing data.
+    """
+    try:
+        return float(metadata["metrics"]["test"]["r2"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _load_artifact_dir(path: Path) -> tuple[Any, dict]:
@@ -311,15 +340,24 @@ def load_best_model(name: str) -> tuple[Any, dict]:
     so a newer version - such as one with ``shap_importance`` added - reliably
     wins over an older tied one instead of depending on API return order.
 
-    Candidates are tried in ascending-RMSE order; a version that fails to load
-    (e.g. a pre-fix joblib-pickled XGBoost artifact - see the module
-    docstring) is logged loudly and skipped in favor of the next-best
-    candidate, rather than crashing the caller. This is new: previously the
-    lowest-RMSE version was picked and downloaded unconditionally, so a
-    corrupted "best" artifact took the whole request down (this is exactly
-    what happened live for ``us_aqi_h72``, whose lowest-recorded-RMSE version
-    was an unloadable XGBoost model). Only raises if *every* registered
-    version fails to load.
+    Candidates are tried in ascending-RMSE order; a candidate is skipped, in
+    favor of the next-best one, if *either*:
+
+    * it fails to deserialize (e.g. a pre-fix joblib-pickled XGBoost artifact -
+      see the module docstring) - this is what previously took the whole
+      request down for ``us_aqi_h72``, whose lowest-recorded-RMSE version was
+      an unloadable XGBoost model, or
+    * its test R2 is at or below :data:`_MIN_ACCEPTABLE_TEST_R2` - a floor, not
+      a ranking change: RMSE still decides the order among versions that pass
+      it. This is what let ``us_aqi_h24`` v8 (RMSE 3.73, nominally the best of
+      21 versions, but R2 -0.76 - no better than predicting the mean) get
+      auto-served over v6/v10, both with R2 > 0.85 and RMSE only marginally
+      higher. A version with no parseable R2 at all is passed through rather
+      than penalized for missing data - this is a floor against a *known-bad*
+      value, not a requirement that one exist.
+
+    Both cases are logged loudly. Only raises if every registered version is
+    rejected for one reason or the other.
     """
     models = _model_registry().get_models(name)
     if not models:
@@ -332,6 +370,13 @@ def load_best_model(name: str) -> tuple[Any, dict]:
         except (KeyError, TypeError, ValueError):
             return float("inf")
 
+    def _flat_test_r2(hops_model) -> float | None:
+        metric_dict = getattr(hops_model, "training_metrics", None) or {}
+        try:
+            return float(metric_dict["test_r2"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
     scored = [(m, _flat_test_rmse(m)) for m in models]
     if any(score != float("inf") for _m, score in scored):
         ranked = sorted(
@@ -343,9 +388,18 @@ def load_best_model(name: str) -> tuple[Any, dict]:
         # SDK did not expose flat metrics without a download - compare
         # artifacts. list_versions() already skips unloadable versions, so
         # whatever it returns is safe to load again here.
-        loadable = list_versions(name)
+        loadable = [
+            meta
+            for meta in list_versions(name)
+            if not (
+                (r2 := _test_r2(meta)) is not None and r2 <= _MIN_ACCEPTABLE_TEST_R2
+            )
+        ]
         if not loadable:
-            raise FileNotFoundError(f"no loadable registered version of {name!r}")
+            raise FileNotFoundError(
+                f"no loadable version of {name!r} passes the test-R2 floor "
+                f"(> {_MIN_ACCEPTABLE_TEST_R2})"
+            )
         best_meta = min(
             loadable,
             key=lambda m: (round(_test_rmse(m), _RMSE_COMPARISON_PRECISION), -int(m["version"])),
@@ -354,6 +408,16 @@ def load_best_model(name: str) -> tuple[Any, dict]:
 
     last_error: Exception | None = None
     for hops_model in candidates:
+        r2 = _flat_test_r2(hops_model)
+        if r2 is not None and r2 <= _MIN_ACCEPTABLE_TEST_R2:
+            print(
+                f"[registry] WARNING: {name!r} v{hops_model.version} (best-by-RMSE "
+                f"candidate) has test R2={r2:.4f} (<= {_MIN_ACCEPTABLE_TEST_R2}, no "
+                f"better than predicting the mean) - rejecting in favor of the "
+                f"next-best version",
+                flush=True,
+            )
+            continue
         try:
             return _download(hops_model)
         except Exception as exc:  # noqa: BLE001 - any deserialization failure
@@ -366,8 +430,9 @@ def load_best_model(name: str) -> tuple[Any, dict]:
             last_error = exc
 
     raise RuntimeError(
-        f"all {len(candidates)} registered version(s) of {name!r} failed to "
-        f"deserialize; last error: {last_error!r}"
+        f"all {len(candidates)} registered version(s) of {name!r} were rejected "
+        f"(failed to deserialize, or test R2 <= {_MIN_ACCEPTABLE_TEST_R2}); "
+        f"last deserialization error: {last_error!r}"
     ) from last_error
 
 
